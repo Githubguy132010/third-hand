@@ -1,0 +1,28 @@
+import ApplicationServices
+
+struct AccessibilityElement {
+    let id: Int
+    let role: String
+    let label: String?
+    let value: String?
+    let enabled: Bool
+    let actions: [String]
+    let axElement: AXUIElement
+
+    var displayRole: String {
+        let clean = role.replacingOccurrences(of: "AX", with: "")
+        return clean.prefix(1).lowercased() + clean.dropFirst()
+    }
+
+    var displayLabel: String {
+        label ?? value ?? "(unlabeled)"
+    }
+
+    func compactDescription() -> String {
+        var parts = "[\(id)] \(displayRole) \"\(displayLabel)\""
+        if let v = value, v != label, !v.isEmpty {
+            parts += " · \(v)"
+        }
+        return parts
+    }
+}
