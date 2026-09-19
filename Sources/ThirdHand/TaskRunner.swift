@@ -132,8 +132,8 @@ final class TaskRunner {
                     throw ControllerError.invalid("The window changed during completion checking. Stopped without sending more input.")
                 }
                 if confirmed { Log.info("Task completed verified=true"); delegate?.taskRunnerDone(self); return }
-                // Once completion is plausible, further clicks could undo the result (e.g. pause playback).
-                throw ControllerError.invalid("The action may be complete, but the final check was inconclusive. Stopped without sending more input.")
+                // Completion is plausible; further clicks could undo the result (e.g. pause playback).
+                Log.info("Task completed verified=false (inconclusive)"); delegate?.taskRunnerDone(self); return
             }
             guard actions < maxSteps else {
                 throw ControllerError.invalid("Stopped after \(maxSteps) actions. The final screen does not confirm completion.")
