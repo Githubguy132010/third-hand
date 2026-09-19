@@ -3,7 +3,6 @@ import Foundation
 struct TextEntryPlan {
     let kind: String
     let text: String
-    var directoryMarker: String? = nil
 
     static func isTerminal(_ bundle: String?) -> Bool {
         ["com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty", "dev.warp.Warp-Stable", "net.kovidgoyal.kitty", "org.alacritty"].contains(bundle ?? "")
@@ -42,13 +41,11 @@ struct TextEntryPlan {
         case "search" where !terminal, "literal":
             return TextEntryPlan(kind: kind, text: content)
         case "change_directory" where terminal:
-            let marker = "THIRDHAND_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
             let path: String
             if content == "~" { path = "\"$HOME\"" }
             else if content.hasPrefix("~/") { path = "\"$HOME\"/" + quote(String(content.dropFirst(2))) }
             else { path = quote(content) }
-            // The marker appears as its own output line only if cd succeeds.
-            return TextEntryPlan(kind: kind, text: "cd -- \(path) && printf '\\n\(marker):%s\\n' \"$PWD\"", directoryMarker: marker)
+            return TextEntryPlan(kind: kind, text: "cd -- \(path)")
         default:
             throw ControllerError.invalid("This request needs writing or command generation that Jev cannot provide. Specify the exact text or a directory to open.")
         }
@@ -58,16 +55,14 @@ struct TextEntryPlan {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    func directoryResult(in elements: [AccessibilityElement]) -> String? {
-        guard let directoryMarker else { return nil }
-        let prefix = directoryMarker + ":"
-        for element in elements where element.source != "ocr" {
-            for line in (element.value ?? "").components(separatedBy: .newlines) {
-                if line.hasPrefix(prefix) {
-                    let path = String(line.dropFirst(prefix.count))
-                    if path.hasPrefix("/") { return path }
-                }
-            }
+    static func directoryResult(before: String, after: String) -> String? {
+        // Read only newly changed transcript text, never a previous pwd result.
+        let common = zip(before, after).prefix { $0 == $1 }.count
+        let newText = String(after.dropFirst(common))
+        let lines = newText.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let command = lines.lastIndex(where: { $0 == "pwd" || $0.hasSuffix(" pwd") }) else { return nil }
+        for line in lines.dropFirst(command + 1) where !line.isEmpty {
+            return line.hasPrefix("/") ? line : nil
         }
         return nil
     }

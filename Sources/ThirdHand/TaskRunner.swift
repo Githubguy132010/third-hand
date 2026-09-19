@@ -25,6 +25,8 @@ final class TaskRunner {
     private var phase = "starting"
     private var entryPlan: TextEntryPlan?
     private var terminalEntrySent = false
+    private var directoryChecked = false
+    private var verifiedDirectory: String?
 
     init(target: AppTarget, goal: String, apiKey: String) {
         self.target = target
@@ -132,7 +134,7 @@ final class TaskRunner {
                 guard isCurrent(fresh) else {
                     throw ControllerError.invalid("The window changed during completion checking. Stopped without sending more input.")
                 }
-                if entryPlan?.directoryMarker != nil, entryPlan?.directoryResult(in: fresh.elements) == nil {
+                if entryPlan?.kind == "change_directory", verifiedDirectory == nil {
                     throw ControllerError.invalid("The terminal has not confirmed the directory change. Stopped without re-entering the command.")
                 }
                 if confirmed { Log.info("Task completed verified=true"); delegate?.taskRunnerDone(self); return }
@@ -209,7 +211,35 @@ final class TaskRunner {
             }
             delegate?.taskRunner(self, status: "Checking the action…")
             phase = "verifying_\(decision.operation)"
-            let after = try await settle(after: decision, before: observation)
+            var after = try await settle(after: decision, before: observation)
+            if entryPlan?.kind == "change_directory", terminalEntrySent, !directoryChecked,
+               decision.operation == "KEY_PRESS", decision.key?.lowercased() == "return", executionError == nil {
+                directoryChecked = true
+                // Keep the cd command clean. Ask the shell for its directory separately.
+                guard let field = after.elements.first(where: { element in
+                    guard let ax = element.axElement else { return false }
+                    return ["AXTextArea", "AXTextField"].contains(element.role) && TextFieldFocus.confirmed(ax, app: target.appElement)
+                }) else { throw ControllerError.invalid("Could not verify the shell prompt; stopped before checking the directory.") }
+                let baseline = field.value ?? ""
+                func checkShell() throws {
+                    try checkFocus()
+                    guard let ax = field.axElement, TextFieldFocus.confirmed(ax, app: target.appElement) else {
+                        throw TextFieldFocus.Failure.changed
+                    }
+                }
+                try await InputController.type("pwd", check: checkShell)
+                try checkShell()
+                try InputController.press("return")
+                let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+                repeat {
+                    try await Task.sleep(nanoseconds: 150_000_000)
+                    after = try await observe()
+                    if let current = ObservationState.matching(field, in: after.elements) {
+                        verifiedDirectory = TextEntryPlan.directoryResult(before: baseline, after: current.value ?? "")
+                    }
+                } while verifiedDirectory == nil && ContinuousClock.now < deadline
+                Log.info("Directory check verified=\(verifiedDirectory != nil)")
+            }
             try checkFocus()
             var verification = ObservationState.verify(decision, before: observation.elements, after: after.elements)
             if let executionError {
@@ -217,8 +247,8 @@ final class TaskRunner {
             }
             try checkFocus()
             if !isCurrent(after) { verification = ActionVerification(verified: false, detail: "Window changed during verification; result is unverified.") }
-            if let path = entryPlan?.directoryResult(in: after.elements) {
-                verification = ActionVerification(verified: true, detail: "Shell confirmed working directory: \(path). The change-directory command succeeded; do not execute it again.")
+            if let path = verifiedDirectory {
+                verification = ActionVerification(verified: true, detail: "A separate pwd command reports working directory: \(path). Compare this path with the requested destination before declaring completion; do not retype the command.")
             } else if TextEntryPlan.isTerminal(target.bundleIdentifier), decision.operation == "TYPE_TEXT", executionError == nil {
                 verification = ActionVerification(verified: false, detail: "Terminal input sent once, awaiting submission and command output. Do not retype. Select Return to submit if appropriate, then verify the result.")
             }

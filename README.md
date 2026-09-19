@@ -47,7 +47,7 @@ Setup shows current permission status. If macOS asks you to quit and reopen afte
 
 Diagnostic logs are written to `~/Desktop/thirdhand.log`. They include action status, timing, and bounded API rejection messages. Review logs before sharing: service error messages can contain request details. API keys are redacted from those messages.
 
-For terminal navigation, focus a shell prompt and give an explicit directory, such as `cd into "~/Projects"`. Third Hand uses shell line-editing shortcuts, submits only when Jev selects Return, and checks a unique success marker printed with the working directory. It will not retype a terminal command automatically. Interactive editors and non-shell terminal programs are not supported by this entry mode.
+For terminal navigation, focus a shell prompt and give an explicit directory, such as `cd into "~/Projects"`. Third Hand uses shell line-editing shortcuts, submits only when Jev selects Return, and runs a separate `pwd` check to read the working directory. It will not retype a terminal command automatically. Interactive editors and non-shell terminal programs are not supported by this entry mode.
 
 ## Status
 

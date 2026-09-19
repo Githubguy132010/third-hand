@@ -11,7 +11,7 @@ final class TextEntryPlanTests: XCTestCase {
 
     func testDirectoryCommandQuotesShellMetacharactersAndHome() throws {
         let plan = try TextEntryPlan.build(kind: "change_directory", content: "/tmp/Shiv's $(touch nope); music", terminal: true)
-        XCTAssertTrue(plan.text.hasPrefix("cd -- '/tmp/Shiv'\\''s $(touch nope); music' && printf"))
+        XCTAssertEqual(plan.text, "cd -- '/tmp/Shiv'\\''s $(touch nope); music'")
         let home = try TextEntryPlan.build(kind: "change_directory", content: "~/My Music", terminal: true)
         XCTAssertTrue(home.text.hasPrefix("cd -- \"$HOME\"/'My Music'"))
         XCTAssertThrowsError(try TextEntryPlan.build(kind: "change_directory", content: "/tmp\nls", terminal: true))
@@ -19,15 +19,15 @@ final class TextEntryPlanTests: XCTestCase {
         XCTAssertThrowsError(try TextEntryPlan.build(kind: "unsupported", content: "Write an essay", terminal: false))
     }
 
-    func testDirectoryVerificationRequiresOutputNotEchoedCommand() throws {
+    func testDirectoryVerificationRequiresFreshPwdOutput() throws {
         let plan = try TextEntryPlan.build(kind: "change_directory", content: "/tmp", terminal: true)
-        func screen(_ text: String) -> [AccessibilityElement] {
-            [AccessibilityElement(id: 1, role: "AXTextArea", label: "Terminal", value: text, enabled: true, actions: [], axElement: nil)]
-        }
-        XCTAssertNil(plan.directoryResult(in: screen("$ " + plan.text)))
-        XCTAssertNil(plan.directoryResult(in: screen("cd: no such file or directory")))
-        XCTAssertNil(plan.directoryResult(in: screen("THIRDHAND_OLD:/tmp")))
-        XCTAssertEqual(plan.directoryResult(in: screen("\(plan.directoryMarker!):/private/tmp\n$ ")), "/private/tmp")
+        XCTAssertEqual(plan.text, "cd -- '/tmp'")
+        XCTAssertFalse(plan.text.contains("printf"))
+        let before = "$ pwd\n/old\n$ "
+        XCTAssertNil(TextEntryPlan.directoryResult(before: before, after: before))
+        XCTAssertNil(TextEntryPlan.directoryResult(before: before, after: before + "pwd"))
+        XCTAssertEqual(TextEntryPlan.directoryResult(before: before, after: before + "pwd\n/private/tmp\n$ "), "/private/tmp")
+        XCTAssertNil(TextEntryPlan.directoryResult(before: before, after: before + "pwd\nerror\n$ "))
     }
 
     func testJevSelectsSearchTextWithoutASecondModel() async throws {
