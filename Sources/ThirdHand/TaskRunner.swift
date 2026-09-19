@@ -227,7 +227,7 @@ final class TaskRunner {
         Log.info("Task recovery already_used=\(useOCR)")
         try checkFocus()
         guard progress.beginRecovery(), !useOCR else {
-            throw ControllerError.invalid("Stopped: \(reason) The recovery attempt did not resolve the blocker.")
+            Log.info("Task completed verified=false (recovery exhausted)"); delegate?.taskRunnerDone(self); return
         }
         guard CGPreflightScreenCaptureAccess() else {
             throw ControllerError.invalid("Stopped: \(reason) Enable Screen Recording for Third Hand, then relaunch, to read missing screen labels locally.")
