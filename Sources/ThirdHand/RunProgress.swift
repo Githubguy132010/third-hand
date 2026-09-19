@@ -49,25 +49,43 @@ enum ObservationState {
 struct RunProgress {
     private var pairs: [String] = []
     private var actions: [String] = []
+    private var failedTargets: Set<String> = []
+    private var pendingTarget: String?
     private(set) var failures = 0
     private(set) var usedRecovery = false
 
-    mutating func record(_ verification: ActionVerification) { failures = verification.verified ? 0 : failures + 1 }
+    mutating func record(_ verification: ActionVerification) {
+        failures = verification.verified ? 0 : failures + 1
+        if !verification.verified, let pendingTarget { failedTargets.insert(pendingTarget) }
+        pendingTarget = nil
+    }
 
     mutating func problem(decision: AgentDecision, elements: [AccessibilityElement]) -> String? {
         let target = elements.first { String($0.id) == decision.targetIndex }
         let identity = target.map { "\($0.role):\($0.displayLabel):\($0.frame.map { "\(Int($0.midX / 8)),\(Int($0.midY / 8))" } ?? "")" } ?? "\(decision.x ?? -1),\(decision.y ?? -1)"
         let action = "\(decision.operation)|\(identity)|\(decision.textValue ?? "")|\(decision.key ?? "")|\((decision.modifiers ?? []).sorted())"
-        let pair = action + "\n" + ObservationState.signature(elements)
-        pairs.append(pair)
-        actions.append(action)
-        pairs = Array(pairs.suffix(12))
-        actions = Array(actions.suffix(12))
+        // Ignore changing clocks/progress text and OCR additions when identifying a
+        // repeated control state. Snapshot IDs never identify an action or a screen.
+        let native = elements.filter { $0.source != "ocr" }
+        let controls = native.filter { !["AXStaticText", "AXProgressIndicator"].contains($0.role) }
+        let includesContent = ["SCROLL_UP", "SCROLL_DOWN", "WAIT"].contains(decision.operation)
+        let screen = includesContent || controls.isEmpty ? (native.isEmpty ? elements : native) : controls
+        let pair = action + "\n" + ObservationState.signature(screen)
+        let targetState = target.map { action + "\n" + ObservationState.signature([$0]) }
+        if pairs.contains(pair) {
+            return "Blocked a repeated action on a previously visited control state before sending input. Choose a different action."
+        }
+        if let targetState, failedTargets.contains(targetState) {
+            return "Blocked an action that already failed on this unchanged control. Choose a different action."
+        }
         if failures >= 2 { return "The last two actions had no verified effect." }
-        if pairs.filter({ $0 == pair }).count >= 3 { return "The task is cycling through the same actions and screens." }
-        if !["SCROLL_UP", "SCROLL_DOWN", "WAIT"].contains(decision.operation), actions.filter({ $0 == action }).count >= 4 {
+        if !["SCROLL_UP", "SCROLL_DOWN", "WAIT"].contains(decision.operation), actions.filter({ $0 == action }).count >= 3 {
             return "The same action keeps recurring without reaching the goal."
         }
+        // Record only admitted actions. Keep the run's memory across OCR recovery.
+        pairs.append(pair)
+        actions.append(action)
+        pendingTarget = targetState
         return nil
     }
 
@@ -75,8 +93,6 @@ struct RunProgress {
         guard !usedRecovery else { return false }
         usedRecovery = true
         failures = 0
-        pairs.removeAll()
-        actions.removeAll()
         return true
     }
 }

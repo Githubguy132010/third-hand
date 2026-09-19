@@ -31,12 +31,45 @@ final class RunProgressTests: XCTestCase {
 
     func testAlternatingActionsAreDetectedDespiteRenumbering() {
         var progress = RunProgress()
-        for step in 0..<4 {
+        for step in 0..<2 {
             let value = step % 2 == 0 ? "A" : "B"
             let id = step + 1
             XCTAssertNil(progress.problem(decision: AgentDecision(operation: "TYPE_TEXT", targetIndex: String(id), textValue: value), elements: [control(id: id, value: value)]))
         }
         XCTAssertNotNil(progress.problem(decision: AgentDecision(operation: "TYPE_TEXT", targetIndex: "99", textValue: "A"), elements: [control(id: 99, value: "A")]))
+    }
+
+    func testFirstRepeatIsBlockedBeforeExecutionAndSurvivesRecovery() {
+        var progress = RunProgress()
+        let click = AgentDecision(operation: "CLICK", targetIndex: "1")
+        XCTAssertNil(progress.problem(decision: click, elements: [control()]))
+        progress.record(ActionVerification(verified: true, detail: "focus changed"))
+        XCTAssertNotNil(progress.problem(decision: click, elements: [control()]))
+        XCTAssertTrue(progress.beginRecovery())
+        let ocr = AccessibilityElement(id: 2, role: "AXStaticText", label: "OCR text", value: nil,
+            enabled: true, actions: [], axElement: nil, source: "ocr")
+        XCTAssertNotNil(progress.problem(decision: click, elements: [control(), ocr]))
+        XCTAssertNil(progress.problem(decision: AgentDecision(operation: "KEY_PRESS", key: "tab"), elements: [control()]))
+    }
+
+    func testClockChangesCannotAuthorizeTheSameClickAgain() {
+        var progress = RunProgress()
+        let click = AgentDecision(operation: "CLICK", targetIndex: "1")
+        func screen(_ time: String) -> [AccessibilityElement] {
+            [control(), AccessibilityElement(id: 2, role: "AXStaticText", label: time, value: nil,
+                enabled: true, actions: [], axElement: nil)]
+        }
+        XCTAssertNil(progress.problem(decision: click, elements: screen("0:01")))
+        progress.record(ActionVerification(verified: true, detail: "clock changed"))
+        XCTAssertNotNil(progress.problem(decision: click, elements: screen("0:02")))
+    }
+
+    func testChangedFieldAllowsNewActionState() {
+        var progress = RunProgress()
+        let click = AgentDecision(operation: "CLICK", targetIndex: "1")
+        XCTAssertNil(progress.problem(decision: click, elements: [control(value: "old")]))
+        progress.record(ActionVerification(verified: false, detail: "no effect"))
+        XCTAssertNil(progress.problem(decision: click, elements: [control(value: "new")]))
     }
 
     func testChangingClockCannotHideRepeatedFailedActions() {
@@ -51,7 +84,7 @@ final class RunProgressTests: XCTestCase {
     func testLegitimateScrollingWithChangingContentIsAllowed() {
         var progress = RunProgress()
         for step in 0..<10 {
-            XCTAssertNil(progress.problem(decision: AgentDecision(operation: "SCROLL_DOWN"), elements: [control(value: "row \(step)")]))
+            XCTAssertNil(progress.problem(decision: AgentDecision(operation: "SCROLL_DOWN"), elements: [control(), AccessibilityElement(id: 2, role: "AXStaticText", label: "row \(step)", value: nil, enabled: true, actions: [], axElement: nil)]))
         }
     }
 
