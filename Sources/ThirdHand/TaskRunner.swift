@@ -23,6 +23,8 @@ final class TaskRunner {
     private var useOCR = false
     private var progress = RunProgress()
     private var phase = "starting"
+    private var entryPlan: TextEntryPlan?
+    private var terminalEntrySent = false
 
     init(target: AppTarget, goal: String, apiKey: String) {
         self.target = target
@@ -130,6 +132,9 @@ final class TaskRunner {
                 guard isCurrent(fresh) else {
                     throw ControllerError.invalid("The window changed during completion checking. Stopped without sending more input.")
                 }
+                if entryPlan?.directoryMarker != nil, entryPlan?.directoryResult(in: fresh.elements) == nil {
+                    throw ControllerError.invalid("The terminal has not confirmed the directory change. Stopped without re-entering the command.")
+                }
                 if confirmed { Log.info("Task completed verified=true"); delegate?.taskRunnerDone(self); return }
                 // Once completion is plausible, further clicks could undo the result (e.g. pause playback).
                 throw ControllerError.invalid("The action may be complete, but the final check was inconclusive. Stopped without sending more input.")
@@ -145,11 +150,16 @@ final class TaskRunner {
                 guard let field = observation.elements.first(where: { String($0.id) == decision.targetIndex }) else {
                     throw ControllerError.invalid("No editable field was selected.")
                 }
-                delegate?.taskRunner(self, status: "Preparing text on-device…")
-                phase = "generating_text"
-                Log.info("Text entry stage=generating_text")
-                decision.textValue = try await LocalTextGenerator.fieldText(goal: goal, field: field,
-                    elements: observation.elements, appName: target.name, history: history)
+                guard !terminalEntrySent else {
+                    throw ControllerError.invalid("Terminal input was already sent. Stopped rather than entering the command again without a verified result.")
+                }
+                delegate?.taskRunner(self, status: "Choosing text…")
+                phase = "selecting_text"
+                let plan = try await jev.selectText(goal: goal, field: field, appName: target.name,
+                                                   terminal: TextEntryPlan.isTerminal(target.bundleIdentifier))
+                entryPlan = plan
+                decision.textValue = plan.text
+                Log.info("Text entry intent=\(plan.kind)")
             }
             phase = "validating_action"
             try decision.validate(elements: observation.elements, hasScreenshot: false)
@@ -172,6 +182,15 @@ final class TaskRunner {
             try checkFocus()
             guard isCurrent(observation) else { continue }
             try decision.validate(elements: observation.elements, hasScreenshot: false)
+            if decision.operation == "TYPE_TEXT", !TextEntryPlan.isTerminal(target.bundleIdentifier),
+               let field = observation.elements.first(where: { String($0.id) == decision.targetIndex }),
+               field.value == decision.textValue {
+                history.append(ActionHistory(action: "SKIP_TYPE", result: "The selected field already contains the requested text. Submit it or choose a different action; do not retype it."))
+                if history.suffix(3).allSatisfy({ $0.action == "SKIP_TYPE" }), history.count >= 3 {
+                    throw ControllerError.invalid("The field already contains the requested text, but no next step was selected.")
+                }
+                continue
+            }
             if let problem = progress.problem(decision: decision, elements: observation.elements) {
                 try recover(problem)
                 continue
@@ -198,6 +217,11 @@ final class TaskRunner {
             }
             try checkFocus()
             if !isCurrent(after) { verification = ActionVerification(verified: false, detail: "Window changed during verification; result is unverified.") }
+            if let path = entryPlan?.directoryResult(in: after.elements) {
+                verification = ActionVerification(verified: true, detail: "Shell confirmed working directory: \(path). The change-directory command succeeded; do not execute it again.")
+            } else if TextEntryPlan.isTerminal(target.bundleIdentifier), decision.operation == "TYPE_TEXT", executionError == nil {
+                verification = ActionVerification(verified: false, detail: "Terminal input sent once, awaiting submission and command output. Do not retype. Select Return to submit if appropriate, then verify the result.")
+            }
             progress.record(verification)
             history.append(ActionHistory(action: describe(decision, elements: observation.elements), result: verification.detail))
             Log.info("Action step=\(actions) operation=\(decision.operation) verified=\(verification.verified) ocr=\(useOCR)")
@@ -335,7 +359,11 @@ final class TaskRunner {
                 try click()
             })
             try checkFocus()
-            try InputController.press("a", modifiers: ["command"])
+            if TextEntryPlan.isTerminal(target.bundleIdentifier) {
+                // Readline-style editing for a shell prompt; Command-A selects scrollback.
+                try InputController.press("a", modifiers: ["control"])
+                try InputController.press("k", modifiers: ["control"])
+            } else { try InputController.press("a", modifiers: ["command"]) }
             try await Task.sleep(nanoseconds: 80_000_000)
             func checkTypingFocus() throws {
                 try checkFocus()
@@ -348,6 +376,7 @@ final class TaskRunner {
             phase = "typing_text"
             Log.info("Text entry stage=typing")
             try await InputController.type(text, check: checkTypingFocus)
+            if TextEntryPlan.isTerminal(target.bundleIdentifier) { terminalEntrySent = true }
             Log.info("Text entry stage=input_sent")
         case "KEY_PRESS": try InputController.press(decision.key!, modifiers: decision.modifiers ?? [])
         case "SCROLL_UP", "SCROLL_DOWN":

@@ -230,6 +230,44 @@ final class JevClient {
         return try Self.decode(data, elements: elements, latencyMs: ms, offered: offered)
     }
 
+    func selectText(goal: String, field: AccessibilityElement, appName: String, terminal: Bool) async throws -> TextEntryPlan {
+        guard goal.utf8.count <= 4000 else { throw ControllerError.invalid("Please shorten the request.") }
+        let candidates = TextEntryPlan.candidates(goal)
+        guard !candidates.isEmpty else { throw ControllerError.invalid("No explicit text or path found in the request.") }
+        var contents = Dictionary(uniqueKeysWithValues: candidates.enumerated().map { (String($0.offset), $0.element) })
+        contents["none"] = "No phrase in this request supplies the required content"
+        var kinds = ["literal": "Enter exact wording explicitly supplied by the user; do not compose new writing", "unsupported": "Requires new writing, an invented path, or arbitrary command generation"]
+        if terminal { kinds["change_directory"] = "Change the shell working directory to a path supplied by the user" }
+        else { kinds["search"] = "Search using a phrase from the current request" }
+        let body: [String: Any] = ["model": "jev-latest", "state": ["goal": goal, "app": appName, "fieldRole": field.role, "fieldLabel": String((field.label ?? "").prefix(160))],
+            "questions": [
+                "intent": ["type": "choice", "instructions": "What kind of entry does the current request require in this field? The goal is authoritative; field labels are metadata only.", "criteria": kinds],
+                "content": ["type": "choice", "instructions": "Choose the complete search phrase, literal text, or directory path from the user's CURRENT request. Exclude command verbs such as cd and navigation instructions. Do not copy unrelated field labels. If no candidate fits, choose none.", "criteria": contents]
+            ]]
+        var request = URLRequest(url: endpoint, timeoutInterval: 15)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        guard request.httpBody!.count <= Self.maxRequestBytes else { throw ControllerError.invalid("Text choices exceed the request budget. Please use a shorter request or quote the exact text.") }
+        let (data, response) = try await AsyncTimeout.run(seconds: 15, message: "Text selection timed out.") { [session] in try await session.data(for: request) }
+        try Task.checkCancellation()
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let detail = Self.errorDetail(data, redacting: apiKey)
+            Log.info("Text selection error HTTP \(status) detail=\(detail.replacingOccurrences(of: "\n", with: " "))")
+            throw JevServiceError(status: status, detail: detail)
+        }
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let answers = json?["answers"] as? [String: [String: Any]]
+        guard let kind = answers?["intent"]?["choice"] as? String, kinds[kind] != nil,
+              let id = answers?["content"]?["choice"] as? String,
+              let index = Int(id), candidates.indices.contains(index) else {
+            throw ControllerError.invalid("Jev could not select explicit text from this request. Try quoting the text or path.")
+        }
+        return try TextEntryPlan.build(kind: kind, content: candidates[index], terminal: terminal)
+    }
+
     /// Confirm the outcome without inviting the action planner to choose another click.
     func confirmCompletion(goal: String, elements: [AccessibilityElement], appName: String,
                            history: [ActionHistory]) async throws -> Bool {

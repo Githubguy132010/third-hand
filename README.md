@@ -6,7 +6,7 @@ Third Hand reads accessible controls, types, clicks, and checks the result. Pres
 
 ## Get started
 
-You’ll need **Xcode 26 or newer**, an Apple Development or Developer ID signing certificate, and a [TypeSafe API key](https://typesafe.ai).
+You’ll need **Xcode 15 or newer**, an Apple Development or Developer ID signing certificate, and a [TypeSafe API key](https://typesafe.ai).
 
 ```sh
 git clone git@github.com:shhivv/third-hand.git
@@ -23,14 +23,14 @@ In the setup window:
 
 Switch to an app, press **Control–Space**, and try a specific task, such as “Search for Adele.”
 
-The app runs on macOS 14+. On-device text generation needs macOS 26+, an Apple Intelligence-capable Mac, Apple Intelligence enabled, and the system model downloaded. Explicit requests such as `type "Adele"` can work without the local model.
+The app runs on macOS 14+. Jev is the only model; Apple Intelligence is not required.
 
 ## How it works
 
 - **Accessibility** reads controls and their current values.
 - **Apple Vision** reads screen text locally when needed. Screenshots aren’t uploaded.
 - **Jev** chooses actions from text descriptions. Your request, app name, screen labels and values, and recent action history are sent to TypeSafe. Third Hand is **not fully offline**.
-- **Apple Foundation Models** prepares text on your Mac when a task needs it.
+- **Structured text entry** lets Jev select search phrases, literal text, or directory paths from your current request. Local code formats shell paths safely. Free-form writing and arbitrary command generation are not supported.
 
 No bundled model weights or extra runtime dependencies. Third Hand never restarts the apps it controls.
 
@@ -47,11 +47,7 @@ Setup shows current permission status. If macOS asks you to quit and reopen afte
 
 Diagnostic logs are written to `~/Desktop/thirdhand.log`. They include action status, timing, and bounded API rejection messages. Review logs before sharing: service error messages can contain request details. API keys are redacted from those messages.
 
-To exercise Apple’s local text model too:
-
-```sh
-THIRDHAND_LOCAL_SMOKE=1 swift test
-```
+For terminal navigation, focus a shell prompt and give an explicit directory, such as `cd into "~/Projects"`. Third Hand uses shell line-editing shortcuts, submits only when Jev selects Return, and checks a unique success marker printed with the working directory. It will not retype a terminal command automatically. Interactive editors and non-shell terminal programs are not supported by this entry mode.
 
 ## Status
 

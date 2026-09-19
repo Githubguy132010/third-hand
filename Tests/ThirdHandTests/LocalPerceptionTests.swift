@@ -50,31 +50,4 @@ final class LocalPerceptionTests: XCTestCase {
         XCTAssertTrue(frame.contains(try XCTUnwrap(text.frame)))
     }
 
-    func testLocalTextContextIncludesSelectedFieldAndBoundsScreenData() throws {
-        let field = element(id: 1, label: "Message", role: "AXTextArea")
-        let elements = (0..<500).map { element(id: $0, label: String(repeating: "x", count: 1000)) }
-        let context = try LocalTextGenerator.context(goal: "Write a greeting", field: field, elements: elements, appName: "Test", history: [])
-        XCTAssertLessThan(context.utf8.count, 2500)
-        XCTAssertTrue(context.contains("Message"))
-        XCTAssertTrue(context.contains("Write a greeting"))
-        XCTAssertThrowsError(try LocalTextGenerator.context(goal: String(repeating: "x", count: 4001), field: field, elements: [], appName: "Test", history: []))
-    }
-
-    func testLiteralEntryNeedsNoModelOrNetwork() async throws {
-        let field = element(id: 1, label: "Search", role: "AXTextField")
-        let text = try await LocalTextGenerator.fieldText(goal: "search for Boards of Canada", field: field, elements: [], appName: "Test", history: [])
-        XCTAssertEqual(text, "Boards of Canada")
-    }
-
-    func testInstalledAppleModelGeneratesCompleteTextWhenOptedIn() async throws {
-        guard ProcessInfo.processInfo.environment["THIRDHAND_LOCAL_SMOKE"] == "1" else {
-            throw XCTSkip("Set THIRDHAND_LOCAL_SMOKE=1 to exercise the installed on-device language model.")
-        }
-        guard LocalTextGenerator.available else { throw XCTSkip(LocalTextGenerator.status) }
-        let field = element(id: 1, label: "Message", role: "AXTextArea")
-        let text = try await LocalTextGenerator.fieldText(goal: "Write one short friendly greeting to Sam.", field: field, elements: [field], appName: "Test", history: [])
-        XCTAssertFalse(text.isEmpty)
-        XCTAssertTrue(text.localizedCaseInsensitiveContains("Sam"))
-        XCTAssertLessThan(text.count, 500)
-    }
 }

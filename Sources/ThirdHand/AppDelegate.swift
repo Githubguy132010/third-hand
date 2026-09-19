@@ -13,7 +13,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TaskRunnerDelegate, Ob
     private var setupWindow: NSWindow?
     private var permissionTimer: Timer?
     private var apiKey: String?
-    @Published var localTextStatus = "Checking Apple’s on-device model…"
     @Published var accessibilityReady = false
     @Published var shortcutReady = false
     @Published var screenReady = false
@@ -70,8 +69,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TaskRunnerDelegate, Ob
     private func refreshPermissions() {
         accessibilityReady = AXIsProcessTrusted()
         screenReady = CGPreflightScreenCaptureAccess()
-        let modelStatus = LocalTextGenerator.status
-        if localTextStatus != modelStatus { localTextStatus = modelStatus }
         let permissionState = "accessibility=\(accessibilityReady) screenRecording=\(screenReady)"
         if permissionState != lastPermissionState { Log.info("Permissions " + permissionState); lastPermissionState = permissionState }
         if accessibilityReady && hotkeyManager?.isRunning == false { hotkeyManager?.start() }
@@ -188,7 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TaskRunnerDelegate, Ob
     @objc func promptAPIKey() {
         let alert = NSAlert()
         alert.messageText = "Enter API Key"
-        alert.informativeText = "Jev API key (TypeSafe), stored in macOS Keychain. The goal, observed accessibility text, and recent action results are sent to TypeSafe. Screenshots and OCR processing stay on this Mac. Apple’s on-device model generates field text. Jev remains a remote text-only service."
+        alert.informativeText = "Jev API key (TypeSafe), stored in macOS Keychain. The goal, observed accessibility text, and recent action results are sent to TypeSafe. Screenshots and OCR processing stay on this Mac. Jev selects text from your request; free-form writing is not supported. Jev remains a remote text-only service."
         alert.alertStyle = .informational
 
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
@@ -253,8 +250,7 @@ private struct SetupView: View {
                 Spacer()
                 Button("Set API Key…") { delegate.promptAPIKey() }
             }
-            Text(delegate.localTextStatus).font(.caption)
-            Text("Screen reading and text generation stay on-device. Jev receives text only.")
+            Text("Screen reading stays on-device. Jev selects actions and text from your request.")
                 .font(.caption).foregroundStyle(.secondary)
             Text(delegate.shortcutReady ? "✓ Control–Space is ready" : "Shortcut waiting for Accessibility access")
                 .foregroundStyle(.secondary)

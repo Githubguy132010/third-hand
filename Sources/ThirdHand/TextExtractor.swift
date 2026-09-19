@@ -1,8 +1,7 @@
 import Foundation
 
 enum TextExtractor {
-    /// Conservative convenience for a single editable field without a generator key.
-    /// Complex/multi-field requests must go through the field-aware text generator.
+    /// Seed literal candidates for Jev; this does not generate new text.
     static func extract(from goal: String) -> String? {
         let patterns = [#"^(?:type|enter)\s+"([^"]*)"\s*$"#,
                         #"^search for\s+"([^"]+)"\s*$"#,
