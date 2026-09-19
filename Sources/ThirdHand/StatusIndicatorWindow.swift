@@ -49,8 +49,22 @@ final class StatusIndicatorWindow: NSPanel {
     }
 
     func showError(_ msg: String) {
-        setContentSize(NSSize(width: 420, height: 160))
-        hosting.rootView = StatusView(text: "✗ " + msg, showSpinner: false, onCancel: { [weak self] in self?.dismiss() })
+        let visible = (screen ?? NSScreen.screens.first { $0.frame.intersects(frame) } ?? NSScreen.main)?.visibleFrame
+            ?? frame.insetBy(dx: -420, dy: -300)
+        let available = visible.insetBy(dx: 12, dy: 12)
+        let width = min(CGFloat(420), available.width)
+        let text = "✗ " + msg
+        let bounds = (text as NSString).boundingRect(
+            with: NSSize(width: max(1, width - 52), height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium)])
+        let height = min(max(44, ceil(bounds.height) + 24), available.height)
+        // Grow inward from the old top-right corner, then keep the whole panel on screen.
+        let origin = NSPoint(x: max(available.minX, min(frame.maxX - width, available.maxX - width)),
+                             y: max(available.minY, min(frame.maxY - height, available.maxY - height)))
+        setFrame(NSRect(origin: origin, size: NSSize(width: width, height: height)), display: false)
+        hosting.rootView = StatusView(text: text, showSpinner: false, onCancel: { [weak self] in self?.dismiss() })
+        hosting.frame = contentView!.bounds
         orderFront(nil)
         // Keep the blocker visible until dismissed or another task begins.
     }
@@ -71,18 +85,28 @@ private struct StatusView: View {
     let showSpinner: Bool
     let onCancel: () -> Void
 
+    private var message: some View {
+        Text(text)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(.white.opacity(0.85))
+    }
+
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             if showSpinner {
                 ProgressView()
                     .controlSize(.small)
                     .scaleEffect(0.7)
             }
-            Text(text)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(.white.opacity(0.85))
-                .lineLimit(showSpinner ? 1 : 8)
-            Spacer()
+            if showSpinner {
+                message.lineLimit(1)
+            } else {
+                ScrollView(.vertical) {
+                    message
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
             Group {
                 Button(action: onCancel) {
                     Image(systemName: "xmark")
