@@ -37,12 +37,29 @@ final class OverlayPanel: NSPanel {
     private func setupLayers(target: AppTarget, prompt: String) {
         guard let cv = contentView else { return }
 
+        // Clip every overlay layer, including the dimming view, to the window edge.
+        let cornerRadius: CGFloat = 12
+        cv.wantsLayer = true
+        cv.layer?.cornerRadius = cornerRadius
+        cv.layer?.masksToBounds = true
+
         let blur = NSVisualEffectView(frame: cv.bounds)
         blur.autoresizingMask = [.width, .height]
         blur.blendingMode = .behindWindow
         blur.material = .hudWindow
         blur.state = .active
         blur.appearance = NSAppearance(named: .darkAqua)
+        // Behind-window blur is composited separately; mask the effect itself too.
+        let maskSize = NSSize(width: cornerRadius * 2 + 2, height: cornerRadius * 2 + 2)
+        let mask = NSImage(size: maskSize, flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
+            return true
+        }
+        mask.capInsets = NSEdgeInsets(top: cornerRadius, left: cornerRadius,
+                                     bottom: cornerRadius, right: cornerRadius)
+        mask.resizingMode = .stretch
+        blur.maskImage = mask
         cv.addSubview(blur)
 
         let dark = NSView(frame: cv.bounds)
