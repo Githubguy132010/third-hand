@@ -35,7 +35,7 @@ enum AXTreeWalker {
             return window.intersects(frame)
         }
         func priority(_ element: AccessibilityElement) -> Int {
-            if element.focused { return 0 }
+            if element.focused || element.isOutcomeEvidence { return 0 }
             if ["AXTextField", "AXTextArea", "AXComboBox"].contains(element.role) { return 1 }
             return element.role == "AXStaticText" ? 3 : 2
         }
@@ -92,9 +92,10 @@ enum AXTreeWalker {
 
         let hasAnyAction = !actions.isEmpty
         let hasLabel = (label != nil && label != "") || (value != nil && value != "")
-        let shouldSkip = skipRoles.contains(role) || (role == "AXGroup" && !hasAnyAction)
+        let outcomeLabel = label?.lowercased().hasPrefix("now playing") == true
+        let shouldSkip = skipRoles.contains(role) || (role == "AXGroup" && !hasAnyAction && !outcomeLabel)
 
-        if !shouldSkip && hasLabel && (hasAnyAction || isInteractiveRole(role) || role == "AXStaticText") {
+        if !shouldSkip && hasLabel && (hasAnyAction || isInteractiveRole(role) || role == "AXStaticText" || outcomeLabel) {
             elements.append(AccessibilityElement(
                 id: nextId,
                 role: role,

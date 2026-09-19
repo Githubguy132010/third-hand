@@ -104,10 +104,9 @@ final class TaskRunner {
             do {
                 phase = "selecting_action"
                 let result = try await jev.decide(goal: goal, elements: observation.elements, appName: target.name, history: history)
-                decision = result.decision
-                if decision.operation == "DONE" && result.done < JevClient.doneThreshold {
-                    decision = AgentDecision(operation: "BLOCKED", reason: "The current screen does not provide enough evidence of completion.")
-                }
+                Log.info("Decision operation=\(result.decision.operation) done=\(result.done) absent=\(result.absent)")
+                decision = result.done >= JevClient.doneThreshold
+                    ? AgentDecision(operation: "DONE") : result.decision
             } catch is CancellationError { throw CancellationError() }
             catch let error as JevServiceError { throw error }
             catch {
@@ -124,12 +123,16 @@ final class TaskRunner {
                 // Re-observe independently: neither input sent nor a confidence score alone is completion.
                 let fresh = try await observe()
                 try checkFocus()
-                let check = try await jev.decide(goal: goal, elements: fresh.elements, appName: target.name, history: history)
-                let confirmed = check.decision.operation == "DONE" && check.done >= JevClient.doneThreshold && progress.failures == 0
+                phase = "confirming_completion"
+                let confirmed = try await jev.confirmCompletion(goal: goal, elements: fresh.elements,
+                                                               appName: target.name, history: history)
                 try checkFocus()
-                guard isCurrent(fresh) else { continue }
+                guard isCurrent(fresh) else {
+                    throw ControllerError.invalid("The window changed during completion checking. Stopped without sending more input.")
+                }
                 if confirmed { Log.info("Task completed verified=true"); delegate?.taskRunnerDone(self); return }
-                decision = AgentDecision(operation: "BLOCKED", reason: "Could not verify the requested outcome on the current screen.")
+                // Once completion is plausible, further clicks could undo the result (e.g. pause playback).
+                throw ControllerError.invalid("The action may be complete, but the final check was inconclusive. Stopped without sending more input.")
             }
             guard actions < maxSteps else {
                 throw ControllerError.invalid("Stopped after \(maxSteps) actions. The final screen does not confirm completion.")

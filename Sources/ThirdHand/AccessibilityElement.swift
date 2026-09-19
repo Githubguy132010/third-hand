@@ -12,6 +12,13 @@ struct AccessibilityElement {
     var focused: Bool = false
     var source: String = "accessibility"
 
+    /// Preserve outcome evidence alongside actionable controls when trimming a screen.
+    var isOutcomeEvidence: Bool {
+        let text = displayLabel.lowercased()
+        return text.hasPrefix("now playing") || text == "pause" ||
+            ["AXProgressIndicator", "AXStatus"].contains(role)
+    }
+
     var displayRole: String {
         let clean = role.replacingOccurrences(of: "AX", with: "")
         return clean.prefix(1).lowercased() + clean.dropFirst()

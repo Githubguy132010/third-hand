@@ -165,7 +165,7 @@ final class JevClient {
         let words = Set(goal.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).filter { $0.count > 2 }.map(String.init))
         func score(_ el: AccessibilityElement) -> Int {
             let label = Set(el.displayLabel.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init))
-            return (el.focused ? 1000 : 0) + words.intersection(label).count * 20
+            return (el.focused ? 1000 : 0) + (el.isOutcomeEvidence ? 900 : 0) + words.intersection(label).count * 20
                 + (["AXTextField", "AXTextArea", "AXComboBox"].contains(el.role) ? 10 : 0)
         }
         var selected = elements.enumerated().sorted {
@@ -228,6 +228,40 @@ final class JevClient {
             throw JevServiceError(status: code, detail: detail)
         }
         return try Self.decode(data, elements: elements, latencyMs: ms, offered: offered)
+    }
+
+    /// Confirm the outcome without inviting the action planner to choose another click.
+    func confirmCompletion(goal: String, elements: [AccessibilityElement], appName: String,
+                           history: [ActionHistory]) async throws -> Bool {
+        let prepared = try Self.preparedRequest(goal: goal, elements: elements, appName: appName, history: history)
+        var body = try JSONSerialization.jsonObject(with: prepared.data) as! [String: Any]
+        body["questions"] = ["done": [
+            "type": "noul",
+            "instructions": "Are ALL requirements of the task already satisfied by the current screen and recorded actions? For playback, the requested media must be the current item and playing; a search result or Play button alone is not proof. Earlier failed attempts do not invalidate a presently confirmed outcome. Do not suggest further actions."
+        ]]
+        var request = URLRequest(url: endpoint, timeoutInterval: 15)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await AsyncTimeout.run(seconds: 15, message: "Completion check timed out.") { [session] in
+            try await session.data(for: request)
+        }
+        try Task.checkCancellation()
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let detail = Self.errorDetail(data, redacting: apiKey)
+            Log.info("Completion error HTTP \(status) detail=\(detail.replacingOccurrences(of: "\n", with: " "))")
+            throw JevServiceError(status: status, detail: detail)
+        }
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let answers = json?["answers"] as? [String: Any]
+        guard let done = (answers?["done"] as? [String: Any])?["noul"] as? Double,
+              done.isFinite, (0...1).contains(done) else {
+            throw ControllerError.invalid("Invalid completion response; no further input was sent.")
+        }
+        Log.info("Completion check done=\(done)")
+        return done >= Self.doneThreshold
     }
 
     nonisolated static func errorDetail(_ data: Data, redacting key: String) -> String {

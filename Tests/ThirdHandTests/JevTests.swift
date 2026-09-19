@@ -42,6 +42,29 @@ final class JevTests: XCTestCase {
         XCTAssertEqual(JevClient.errorDetail(data, redacting: "key"), "Context limit exceeded")
     }
 
+    func testCompletionCheckDoesNotAskForAnotherAction() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CompletionProtocol.self]
+        let client = JevClient(apiKey: "fixture", session: URLSession(configuration: config))
+        let result = try await client.confirmCompletion(goal: "Play Skyfall by Adele", elements: [], appName: "Spotify",
+            history: [ActionHistory(action: "CLICK", result: "Previous attempt failed")])
+        XCTAssertTrue(result)
+    }
+
+    func testPlaybackEvidenceSurvivesRequestCompaction() throws {
+        var controls = (1...500).map { element($0, "AXButton") }
+        controls.append(AccessibilityElement(id: 700, role: "AXGroup", label: "Now playing: Skyfall by Adele",
+            value: nil, enabled: true, actions: [], axElement: nil))
+        controls.append(AccessibilityElement(id: 701, role: "AXButton", label: "Pause",
+            value: nil, enabled: true, actions: [], axElement: nil))
+        let request = try JevClient.preparedRequest(goal: "Play Skyfall by Adele", elements: controls, appName: "Spotify", history: [])
+        let body = try JSONSerialization.jsonObject(with: request.data) as! [String: Any]
+        let state = body["state"] as! [String: Any]
+        let ids = (state["elements"] as! [[String: Any]]).compactMap { $0["id"] as? String }
+        XCTAssertTrue(ids.contains("700"))
+        XCTAssertTrue(ids.contains("701"))
+    }
+
     func testOnlyCompatibleEnabledControlsAreOffered() {
         let controls = [element(1, "AXButton"), element(2, "AXTextField"), element(3, "AXTextField", enabled: false), element(4, "AXStaticText")]
         let targets = JevClient.targets(controls)
@@ -186,6 +209,31 @@ private final class RejectedRequestProtocol: URLProtocol {
     override func startLoading() {
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(#"{"error":{"message":"Choice accepts at most 255 options"}}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+private final class CompletionProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        var data = request.httpBody ?? Data()
+        if let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count <= 0 { break }
+                data.append(contentsOf: buffer.prefix(count))
+            }
+        }
+        let body = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let questions = body["questions"] as! [String: Any]
+        XCTAssertEqual(Set(questions.keys), ["done"])
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"answers":{"done":{"noul":0.95}}}"#.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
