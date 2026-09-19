@@ -238,32 +238,50 @@ final class JevClient {
         contents["none"] = "No phrase in this request supplies the required content"
         var kinds = ["literal": "Enter exact wording explicitly supplied by the user; do not compose new writing", "unsupported": "Requires new writing, an invented path, or arbitrary command generation"]
         if !terminal { kinds["search"] = "Search using a phrase from the current request" }
-        let body: [String: Any] = ["model": "jev-latest", "state": ["goal": goal, "app": appName, "fieldRole": field.role, "fieldLabel": String((field.label ?? "").prefix(160))],
-            "questions": [
-                "intent": ["type": "choice", "instructions": "What kind of entry does the current request require in this field? The goal is authoritative; field labels are metadata only.", "criteria": kinds],
-                "content": ["type": "choice", "instructions": "Choose the complete search phrase or exact literal text from the user's CURRENT request. For terminal input preserve the entire explicitly supplied command, including its command name and arguments. Do not translate navigation requests into commands. Do not copy unrelated field labels. If no candidate fits, choose none.", "criteria": contents]
-            ]]
-        var request = URLRequest(url: endpoint, timeoutInterval: 15)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        guard request.httpBody!.count <= Self.maxRequestBytes else { throw ControllerError.invalid("Text choices exceed the request budget. Please use a shorter request or quote the exact text.") }
-        let (data, response) = try await AsyncTimeout.run(seconds: 15, message: "Text selection timed out.") { [session] in try await session.data(for: request) }
-        try Task.checkCancellation()
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            let detail = Self.errorDetail(data, redacting: apiKey)
-            Log.info("Text selection error HTTP \(status) detail=\(detail.replacingOccurrences(of: "\n", with: " "))")
-            throw JevServiceError(status: status, detail: detail)
+        let state: [String: Any] = ["goal": goal, "app": appName, "fieldRole": field.role,
+                                   "fieldLabel": String((field.label ?? "").prefix(160))]
+        func ask(_ questions: [String: Any], intent: String? = nil) async throws -> [String: [String: Any]] {
+            var context = state
+            if let intent { context["selectedIntent"] = intent }
+            let body: [String: Any] = ["model": "jev-latest", "state": context, "questions": questions]
+            var request = URLRequest(url: endpoint, timeoutInterval: 15)
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            guard request.httpBody!.count <= Self.maxRequestBytes else { throw ControllerError.invalid("Text choices exceed the request budget. Please use a shorter request or quote the exact text.") }
+            let (data, response) = try await AsyncTimeout.run(seconds: 15, message: "Text selection timed out.") { [session] in try await session.data(for: request) }
+            try Task.checkCancellation()
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                let detail = Self.errorDetail(data, redacting: apiKey)
+                Log.info("Text selection error HTTP \(status) detail=\(detail.replacingOccurrences(of: "\n", with: " "))")
+                throw JevServiceError(status: status, detail: detail)
+            }
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            guard let answers = json?["answers"] as? [String: [String: Any]] else {
+                throw ControllerError.invalid("Invalid text-selection response.")
+            }
+            return answers
         }
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let answers = json?["answers"] as? [String: [String: Any]]
-        guard let kind = answers?["intent"]?["choice"] as? String, kinds[kind] != nil,
-              let id = answers?["content"]?["choice"] as? String,
+        let intentAnswer = try await ask(["intent": ["type": "choice",
+            "instructions": "What kind of entry does the current request require in this field? Search/navigation tasks require search keywords, not literal transcription of the task. Choose literal only when the user explicitly requests entering supplied wording or a command. The goal is authoritative; field labels are metadata only.", "criteria": kinds]])
+        guard let kind = intentAnswer["intent"]?["choice"] as? String, kinds[kind] != nil else {
+            throw ControllerError.invalid("Jev could not identify the required input type.")
+        }
+        guard kind != "unsupported" else {
+            throw ControllerError.invalid("Specify the exact text or command to enter; new writing and command generation are unsupported.")
+        }
+        let instructions = kind == "search"
+            ? "Select the shortest precise entity name or keywords needed in this search field to advance the task. Omit instructions to the assistant, navigation verbs, and subsequent actions. Do NOT paste the full task sentence. Preserve multi-word names and titles. Choose none if no candidate is suitable."
+            : "Select only the exact wording the user explicitly asked to enter, without the surrounding request to type it. For terminal input preserve the entire supplied command, including its command name and arguments. Do not translate navigation requests into commands. Choose none if no candidate fits."
+        let contentAnswer = try await ask(["content": ["type": "choice", "instructions": instructions,
+                                                       "criteria": contents]], intent: kind)
+        guard let id = contentAnswer["content"]?["choice"] as? String,
               let index = Int(id), candidates.indices.contains(index) else {
-            throw ControllerError.invalid("Jev could not select explicit text from this request. Try quoting the text or path.")
+            throw ControllerError.invalid("Jev could not select explicit text from this request. Try quoting the text.")
         }
+
         return try TextEntryPlan.build(kind: kind, content: candidates[index], terminal: terminal)
     }
 

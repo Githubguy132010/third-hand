@@ -48,8 +48,15 @@ private final class TextSelectionProtocol: URLProtocol {
         XCTAssertFalse(text.contains("Adele"))
         let body = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
         let questions = body["questions"] as! [String: [String: Any]]
-        XCTAssertEqual(Set(questions.keys), ["intent", "content"])
-        XCTAssertEqual(questions["intent"]?["type"] as? String, "choice")
+        let state = body["state"] as! [String: Any]
+        if questions["intent"] != nil {
+            XCTAssertEqual(Set(questions.keys), ["intent"])
+            XCTAssertNil(state["selectedIntent"])
+        } else {
+            XCTAssertEqual(Set(questions.keys), ["content"])
+            XCTAssertEqual(state["selectedIntent"] as? String, "search")
+            XCTAssertTrue((questions["content"]?["instructions"] as? String)?.contains("Do NOT paste the full task sentence") == true)
+        }
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(#"{"answers":{"intent":{"choice":"search"},"content":{"choice":"0"}}}"#.utf8))
         client?.urlProtocolDidFinishLoading(self)
