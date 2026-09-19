@@ -107,21 +107,25 @@ final class TaskRunner {
                 delegate?.taskRunner(self, status: "Thinking…")
                 let result = try await jev.decide(goal: goal, elements: elements, appName: target.name, history: history)
 
+                Log.info("Jev done=\(String(format: "%.2f", result.done)) absent=\(String(format: "%.2f", result.absent)) pickedNone=\(result.pickedNone)")
                 if result.done >= JevClient.doneThreshold {
-                    Log.info("Jev done=\(String(format: "%.2f", result.done)) — task complete")
+                    Log.info("Jev done threshold reached — task complete")
                     delegate?.taskRunnerDone(self); return
                 }
-                if result.absent >= JevClient.absentThreshold {
+                if result.pickedNone && result.absent >= JevClient.absentThreshold {
                     throw ControllerError.invalid("The needed control isn't visible on screen. Try a more specific request or navigate there first.")
                 }
 
                 var decision = result.decision
 
                 if decision.operation == "TYPE_TEXT", decision.textValue == nil {
-                    guard let text = TextExtractor.extract(from: goal) else {
-                        throw ControllerError.invalid("Could not determine what text to enter. Use quotes in your request, e.g. search for \"Drake\"")
+                    if let text = TextExtractor.extract(from: goal) {
+                        decision.textValue = text
+                    } else {
+                        let field = elements.first { String($0.id) == decision.targetIndex }
+                        delegate?.taskRunner(self, status: "Figuring out what to type…")
+                        decision.textValue = try await jev.buildText(goal: goal, fieldLabel: field?.displayLabel ?? "text field")
                     }
-                    decision.textValue = text
                 }
                 try decision.validate(elements: elements, hasScreenshot: false)
 

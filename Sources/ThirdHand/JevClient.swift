@@ -136,6 +136,71 @@ final class JevClient {
         return try Self.decode(data, elements: elements, latencyMs: ms)
     }
 
+    // MARK: - Word-by-word text builder
+
+    func buildText(goal: String, fieldLabel: String) async throws -> String {
+        let endToken = "__end__"
+        var wordPool = Set<String>()
+        for word in goal.components(separatedBy: .whitespaces) where !word.isEmpty {
+            wordPool.insert(word)
+            let stripped = word.trimmingCharacters(in: .punctuationCharacters)
+            if !stripped.isEmpty { wordPool.insert(stripped) }
+        }
+        for w in ["the", "a", "an", "my", "new", "best", "top", "all",
+                   "1", "2", "3", "4", "5", "0", "-", ".", "@"] {
+            wordPool.insert(w)
+        }
+
+        var criteria: [String: String] = [:]
+        for word in wordPool { criteria[word] = word }
+        criteria[endToken] = "Text is complete — stop here"
+
+        var accumulated: [String] = []
+
+        for _ in 0..<15 {
+            let state: [String: Any] = [
+                "task": goal,
+                "field": fieldLabel,
+                "typed": accumulated.isEmpty ? "(nothing yet)" : accumulated.joined(separator: " ")
+            ]
+            let questions: [String: Any] = [
+                "next": [
+                    "type": "choice",
+                    "criteria": criteria,
+                    "instructions": "Building text to type into \"\(fieldLabel)\" for: \"\(goal)\". Pick the next content word. Skip action verbs and app names. Pick \(endToken) when done."
+                ] as [String: Any]
+            ]
+            let body: [String: Any] = ["model": "jev-latest", "questions": questions, "state": state]
+
+            var req = URLRequest(url: endpoint, timeoutInterval: 10)
+            req.httpMethod = "POST"
+            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+            let (data, response) = try await session.data(for: req)
+            try Task.checkCancellation()
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let answers = json["answers"] as? [String: Any],
+                  let answer = answers["next"] as? [String: Any],
+                  let choice = answer["choice"] as? String else {
+                break
+            }
+            if choice == endToken { break }
+            guard criteria[choice] != nil else { break }
+            accumulated.append(choice)
+        }
+
+        guard !accumulated.isEmpty else {
+            throw ControllerError.invalid("Could not determine what text to enter from your request")
+        }
+        Log.info("buildText: \"\(accumulated.joined(separator: " "))\" from goal: \"\(goal)\"")
+        return accumulated.joined(separator: " ")
+    }
+
+    // MARK: - Decode
+
     static func decode(_ data: Data, elements: [AccessibilityElement], latencyMs: Int = 0) throws -> JevResult {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let answers = json["answers"] as? [String: Any] else {
