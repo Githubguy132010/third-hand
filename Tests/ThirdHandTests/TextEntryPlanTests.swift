@@ -9,25 +9,12 @@ final class TextEntryPlanTests: XCTestCase {
         XCTAssertFalse(candidates.contains { $0.localizedCaseInsensitiveContains("skyfall") || $0.localizedCaseInsensitiveContains("adele") })
     }
 
-    func testDirectoryCommandQuotesShellMetacharactersAndHome() throws {
-        let plan = try TextEntryPlan.build(kind: "change_directory", content: "/tmp/Shiv's $(touch nope); music", terminal: true)
-        XCTAssertEqual(plan.text, "cd -- '/tmp/Shiv'\\''s $(touch nope); music'")
-        let home = try TextEntryPlan.build(kind: "change_directory", content: "~/My Music", terminal: true)
-        XCTAssertTrue(home.text.hasPrefix("cd -- \"$HOME\"/'My Music'"))
-        XCTAssertThrowsError(try TextEntryPlan.build(kind: "change_directory", content: "/tmp\nls", terminal: true))
-        XCTAssertThrowsError(try TextEntryPlan.build(kind: "change_directory", content: "/tmp", terminal: false))
-        XCTAssertThrowsError(try TextEntryPlan.build(kind: "unsupported", content: "Write an essay", terminal: false))
-    }
-
-    func testDirectoryVerificationRequiresFreshPwdOutput() throws {
-        let plan = try TextEntryPlan.build(kind: "change_directory", content: "/tmp", terminal: true)
-        XCTAssertEqual(plan.text, "cd -- '/tmp'")
-        XCTAssertFalse(plan.text.contains("printf"))
-        let before = "$ pwd\n/old\n$ "
-        XCTAssertNil(TextEntryPlan.directoryResult(before: before, after: before))
-        XCTAssertNil(TextEntryPlan.directoryResult(before: before, after: before + "pwd"))
-        XCTAssertEqual(TextEntryPlan.directoryResult(before: before, after: before + "pwd\n/private/tmp\n$ "), "/private/tmp")
-        XCTAssertNil(TextEntryPlan.directoryResult(before: before, after: before + "pwd\nerror\n$ "))
+    func testLiteralCommandIsPreservedWithoutAddedCommands() throws {
+        let command = "cd '/tmp/My Project'"
+        let plan = try TextEntryPlan.build(kind: "literal", content: command, terminal: true)
+        XCTAssertEqual(plan.text, command)
+        XCTAssertThrowsError(try TextEntryPlan.build(kind: "change_directory", content: "/tmp", terminal: true))
+        XCTAssertThrowsError(try TextEntryPlan.build(kind: "unsupported", content: "go into my project", terminal: true))
     }
 
     func testJevSelectsSearchTextWithoutASecondModel() async throws {

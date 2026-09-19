@@ -40,30 +40,9 @@ struct TextEntryPlan {
         switch kind {
         case "search" where !terminal, "literal":
             return TextEntryPlan(kind: kind, text: content)
-        case "change_directory" where terminal:
-            let path: String
-            if content == "~" { path = "\"$HOME\"" }
-            else if content.hasPrefix("~/") { path = "\"$HOME\"/" + quote(String(content.dropFirst(2))) }
-            else { path = quote(content) }
-            return TextEntryPlan(kind: kind, text: "cd -- \(path)")
         default:
-            throw ControllerError.invalid("This request needs writing or command generation that Jev cannot provide. Specify the exact text or a directory to open.")
+            throw ControllerError.invalid("This request needs writing or command generation that Jev cannot provide. Specify the exact text or command to enter.")
         }
     }
 
-    private static func quote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    static func directoryResult(before: String, after: String) -> String? {
-        // Read only newly changed transcript text, never a previous pwd result.
-        let common = zip(before, after).prefix { $0 == $1 }.count
-        let newText = String(after.dropFirst(common))
-        let lines = newText.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
-        guard let command = lines.lastIndex(where: { $0 == "pwd" || $0.hasSuffix(" pwd") }) else { return nil }
-        for line in lines.dropFirst(command + 1) where !line.isEmpty {
-            return line.hasPrefix("/") ? line : nil
-        }
-        return nil
-    }
 }

@@ -30,7 +30,7 @@ The app runs on macOS 14+. Jev is the only model; Apple Intelligence is not requ
 - **Accessibility** reads controls and their current values.
 - **Apple Vision** reads screen text locally when needed. Screenshots aren’t uploaded.
 - **Jev** chooses actions from text descriptions. Your request, app name, screen labels and values, and recent action history are sent to TypeSafe. Third Hand is **not fully offline**.
-- **Structured text entry** lets Jev select search phrases, literal text, or directory paths from your current request. Local code formats shell paths safely. Free-form writing and arbitrary command generation are not supported.
+- **Structured text entry** lets Jev select search phrases or literal text from your current request. Free-form writing and arbitrary command generation are not supported.
 
 No bundled model weights or extra runtime dependencies. Third Hand never restarts the apps it controls.
 
@@ -47,7 +47,7 @@ Setup shows current permission status. If macOS asks you to quit and reopen afte
 
 Diagnostic logs are written to `~/Desktop/thirdhand.log`. They include action status, timing, and bounded API rejection messages. Review logs before sharing: service error messages can contain request details. API keys are redacted from those messages.
 
-For terminal navigation, focus a shell prompt and give an explicit directory, such as `cd into "~/Projects"`. Third Hand uses shell line-editing shortcuts, submits only when Jev selects Return, and runs a separate `pwd` check to read the working directory. It will not retype a terminal command automatically. Interactive editors and non-shell terminal programs are not supported by this entry mode.
+For terminal entry, focus a shell prompt and provide the exact command, such as `type "ls -la"`. Third Hand preserves the supplied command and submits only when Jev selects Return. It does not construct commands from navigation requests or append verification commands. It will not retype a terminal command automatically. Interactive editors and non-shell terminal programs are not supported by this entry mode.
 
 ## Status
 

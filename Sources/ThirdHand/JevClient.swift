@@ -237,12 +237,11 @@ final class JevClient {
         var contents = Dictionary(uniqueKeysWithValues: candidates.enumerated().map { (String($0.offset), $0.element) })
         contents["none"] = "No phrase in this request supplies the required content"
         var kinds = ["literal": "Enter exact wording explicitly supplied by the user; do not compose new writing", "unsupported": "Requires new writing, an invented path, or arbitrary command generation"]
-        if terminal { kinds["change_directory"] = "Change the shell working directory to a path supplied by the user" }
-        else { kinds["search"] = "Search using a phrase from the current request" }
+        if !terminal { kinds["search"] = "Search using a phrase from the current request" }
         let body: [String: Any] = ["model": "jev-latest", "state": ["goal": goal, "app": appName, "fieldRole": field.role, "fieldLabel": String((field.label ?? "").prefix(160))],
             "questions": [
                 "intent": ["type": "choice", "instructions": "What kind of entry does the current request require in this field? The goal is authoritative; field labels are metadata only.", "criteria": kinds],
-                "content": ["type": "choice", "instructions": "Choose the complete search phrase, literal text, or directory path from the user's CURRENT request. Exclude command verbs such as cd and navigation instructions. Do not copy unrelated field labels. If no candidate fits, choose none.", "criteria": contents]
+                "content": ["type": "choice", "instructions": "Choose the complete search phrase or exact literal text from the user's CURRENT request. For terminal input preserve the entire explicitly supplied command, including its command name and arguments. Do not translate navigation requests into commands. Do not copy unrelated field labels. If no candidate fits, choose none.", "criteria": contents]
             ]]
         var request = URLRequest(url: endpoint, timeoutInterval: 15)
         request.httpMethod = "POST"
