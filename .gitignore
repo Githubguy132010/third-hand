@@ -13,3 +13,6 @@ Third Hand.app/
 *.p12
 *.pfx
 *.key
+
+# Release archives
+dist/

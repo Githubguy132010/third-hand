@@ -38,7 +38,7 @@ cp "$BUILD/ThirdHand" "$APP/Contents/MacOS/ThirdHand"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 echo "Signing with the pinned Apple identity…"
-codesign --force --sign "$IDENTITY" "$APP"
+codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
 codesign --verify --strict "$APP"
 
 # Certificate-signed updates must continue to satisfy the installed identity.
