@@ -1,28 +1,48 @@
 import AppKit
 import ScreenCaptureKit
+import ApplicationServices
 
 struct WindowSnapshot {
     let windowID: CGWindowID
     let frame: CGRect // Global Quartz coordinates, top-left origin.
-    let base64JPEG: String
+    let image: CGImage?
 
     static func frontWindow(pid: pid_t) -> (id: CGWindowID, frame: CGRect)? {
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
-        for window in windows {
+        let candidates: [(id: CGWindowID, frame: CGRect)] = windows.compactMap { window in
             guard window[kCGWindowOwnerPID as String] as? Int32 == pid,
                   window[kCGWindowLayer as String] as? Int == 0,
                   let id = window[kCGWindowNumber as String] as? UInt32,
                   let bounds = window[kCGWindowBounds as String] as? NSDictionary,
-                  let frame = CGRect(dictionaryRepresentation: bounds), frame.width > 1, frame.height > 1 else { continue }
+                  let frame = CGRect(dictionaryRepresentation: bounds), frame.width > 1, frame.height > 1 else { return nil }
             return (id, frame)
         }
-        return nil
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.1)
+        var focused: CFTypeRef?
+        var focusedFrame: CGRect?
+        if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &focused) == .success,
+           let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() {
+            focusedFrame = InputController.frame(focused as! AXUIElement)
+        }
+        return selectWindow(candidates, focusedFrame: focusedFrame)
+    }
+
+    /// Keep AX traversal, click bounds, and capture tied to the same real window.
+    static func selectWindow(_ candidates: [(id: CGWindowID, frame: CGRect)],
+                             focusedFrame: CGRect?) -> (id: CGWindowID, frame: CGRect)? {
+        guard let focusedFrame else { return candidates.first }
+        return candidates.first { candidate in
+            abs(candidate.frame.minX - focusedFrame.minX) < 2 &&
+            abs(candidate.frame.minY - focusedFrame.minY) < 2 &&
+            abs(candidate.frame.width - focusedFrame.width) < 2 &&
+            abs(candidate.frame.height - focusedFrame.height) < 2
+        }
     }
 
     static func capture(pid: pid_t) async throws -> WindowSnapshot {
         guard CGPreflightScreenCaptureAccess() else {
-            CGRequestScreenCaptureAccess()
-            throw ControllerError.invalid("Enable Screen Recording for Third Hand in System Settings, then relaunch to control custom interfaces.")
+            throw ControllerError.invalid("Enable Screen Recording for Third Hand in System Settings, then relaunch to read screen text locally.")
         }
         guard let front = frontWindow(pid: pid) else { throw ControllerError.invalid("No visible target window") }
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
@@ -37,11 +57,7 @@ struct WindowSnapshot {
         config.showsCursor = false
         config.ignoreShadowsSingleWindow = true
         let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-        let bitmap = NSBitmapImageRep(cgImage: image)
-        guard let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.75]) else {
-            throw ControllerError.invalid("Could not encode window screenshot")
-        }
-        return WindowSnapshot(windowID: window.windowID, frame: window.frame, base64JPEG: jpeg.base64EncodedString())
+        return WindowSnapshot(windowID: window.windowID, frame: window.frame, image: image)
     }
 
     func point(x: Double, y: Double) -> CGPoint {

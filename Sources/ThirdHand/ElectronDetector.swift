@@ -3,8 +3,6 @@ import Foundation
 
 enum ElectronDetector {
 
-    static let debugPort = 9222
-
     static func isElectron(_ target: AppTarget) -> Bool {
         guard let bundleId = target.bundleIdentifier,
               let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else { return false }
@@ -12,43 +10,34 @@ enum ElectronDetector {
         return FileManager.default.fileExists(atPath: frameworkPath)
     }
 
+    // Only connect to an explicitly enabled listener owned by the captured app.
+    // Never scan common ports, terminate the app, or change its launch arguments.
     static func findDebugPort(pid: pid_t) async -> Int? {
-        if let port = portFromProcessArgs(pid: pid) { return port }
-        for port in [debugPort, 9229] {
-            if await probePort(port) { return port }
-        }
-        return nil
+        guard let port = portFromProcessArgs(pid: pid), ownsListener(pid: pid, port: port),
+              await probePort(port) else { return nil }
+        return port
     }
 
-    static func relaunchWithDebugging(target: AppTarget) async throws -> Int {
-        guard let bundleId = target.bundleIdentifier else {
-            throw ControllerError.invalid("Cannot relaunch: no bundle identifier")
-        }
-        let port = debugPort
+    static func debugPort(in arguments: String) -> Int? {
+        let parts = arguments.split(whereSeparator: { $0.isWhitespace })
+        guard let flag = parts.first(where: { $0.hasPrefix("--remote-debugging-port=") }),
+              let port = Int(flag.dropFirst("--remote-debugging-port=".count)),
+              (1...65535).contains(port) else { return nil }
+        return port
+    }
 
-        target.application.terminate()
-        for _ in 0..<40 {
-            if target.application.isTerminated { break }
-            try await Task.sleep(nanoseconds: 100_000_000)
-        }
-        if !target.application.isTerminated {
-            target.application.forceTerminate()
-            try await Task.sleep(nanoseconds: 300_000_000)
-        }
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        proc.arguments = ["-b", bundleId, "--args", "--remote-debugging-port=\(port)"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        try proc.run()
-        proc.waitUntilExit()
-
-        for _ in 0..<40 {
-            try await Task.sleep(nanoseconds: 250_000_000)
-            if await probePort(port) { return port }
-        }
-        throw ControllerError.invalid("\(target.name) restarted but CDP port \(port) did not respond")
+    private static func ownsListener(pid: pid_t, port: Int) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        process.arguments = ["-a", "-p", String(pid), "-iTCP:\(port)", "-sTCP:LISTEN", "-t"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return false }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus == 0 && String(decoding: data, as: UTF8.self)
+            .split(whereSeparator: { $0.isWhitespace }).contains(Substring(String(pid)))
     }
 
     private static func portFromProcessArgs(pid: pid_t) -> Int? {
@@ -61,10 +50,7 @@ enum ElectronDetector {
         do { try process.run() } catch { return nil }
         process.waitUntilExit()
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        guard let range = output.range(of: "--remote-debugging-port=") else { return nil }
-        let after = output[range.upperBound...]
-        let digits = after.prefix(while: { $0.isNumber })
-        return Int(digits)
+        return debugPort(in: output)
     }
 
     static func probePort(_ port: Int) async -> Bool {

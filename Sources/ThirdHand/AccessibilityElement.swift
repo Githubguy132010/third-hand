@@ -8,7 +8,9 @@ struct AccessibilityElement {
     let enabled: Bool
     let actions: [String]
     let axElement: AXUIElement?
-    let frame: CGRect?
+    var frame: CGRect? = nil
+    var focused: Bool = false
+    var source: String = "accessibility"
 
     var displayRole: String {
         let clean = role.replacingOccurrences(of: "AX", with: "")

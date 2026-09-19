@@ -41,6 +41,7 @@ enum KeychainHelper {
         catch { return nil }
     }
 
+
     static func delete() {
         SecItemDelete(query as CFDictionary)
         try? FileManager.default.removeItem(atPath: legacyPath)

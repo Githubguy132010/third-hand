@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TaskRunnerDelegate, Ob
     private var setupWindow: NSWindow?
     private var permissionTimer: Timer?
     private var apiKey: String?
+    @Published var localTextStatus = "Checking Apple’s on-device model…"
     @Published var accessibilityReady = false
     @Published var shortcutReady = false
     @Published var screenReady = false
@@ -52,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TaskRunnerDelegate, Ob
 
     func showSetup() {
         if setupWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 510, height: 370),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 470),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "Third Hand"
             window.isReleasedWhenClosed = false
@@ -64,9 +65,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TaskRunnerDelegate, Ob
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    private var lastPermissionState = ""
+
     private func refreshPermissions() {
         accessibilityReady = AXIsProcessTrusted()
         screenReady = CGPreflightScreenCaptureAccess()
+        let modelStatus = LocalTextGenerator.status
+        if localTextStatus != modelStatus { localTextStatus = modelStatus }
+        let permissionState = "accessibility=\(accessibilityReady) screenRecording=\(screenReady)"
+        if permissionState != lastPermissionState { Log.info("Permissions " + permissionState); lastPermissionState = permissionState }
         if accessibilityReady && hotkeyManager?.isRunning == false { hotkeyManager?.start() }
         if !accessibilityReady && hotkeyManager?.isRunning == true { hotkeyManager?.stop() }
         shortcutReady = hotkeyManager?.isRunning == true
@@ -130,6 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TaskRunnerDelegate, Ob
         runner.delegate = self
         taskRunner = runner
 
+        statusWindow?.dismiss()
         statusWindow = StatusIndicatorWindow(near: target) { [weak self] in
             self?.taskRunner?.cancel()
         }
@@ -152,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TaskRunnerDelegate, Ob
 
     func taskRunnerFailed(_ r: TaskRunner, error: String) {
         guard taskRunner === r else { return }
-        Log.info("FAILED: \(error)")
+        Log.info("Task stopped; blocker displayed in status panel")
         statusWindow?.showError(error)
         taskRunner = nil
     }
@@ -167,21 +175,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TaskRunnerDelegate, Ob
 
     @objc func promptAccessibility() {
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        let trusted = AXIsProcessTrustedWithOptions(opts)
-        if !trusted {
-            let a = NSAlert()
-            a.messageText = "Accessibility Required"
-            a.informativeText = "After toggling Third Hand ON in System Settings → Privacy & Security → Accessibility, quit and relaunch the app."
-            a.addButton(withTitle: "OK")
-            NSApp.activate(ignoringOtherApps: true)
-            a.runModal()
-        }
+        if !AXIsProcessTrustedWithOptions(opts) { openPrivacySettings("Privacy_Accessibility") }
+        refreshPermissions()
+    }
+
+    func promptScreenRecording() {
+        if !CGPreflightScreenCaptureAccess() { _ = CGRequestScreenCaptureAccess() }
+        if !CGPreflightScreenCaptureAccess() { openPrivacySettings("Privacy_ScreenCapture") }
+        refreshPermissions()
     }
 
     @objc func promptAPIKey() {
         let alert = NSAlert()
         alert.messageText = "Enter API Key"
-        alert.informativeText = "Jev API key (TypeSafe), stored in macOS Keychain. Element labels are sent to select the right control; no screenshots or full-page text leave the device."
+        alert.informativeText = "Jev API key (TypeSafe), stored in macOS Keychain. The goal, observed accessibility text, and recent action results are sent to TypeSafe. Screenshots and OCR processing stay on this Mac. Apple’s on-device model generates field text. Jev remains a remote text-only service."
         alert.alertStyle = .informational
 
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
@@ -216,32 +223,48 @@ private struct SetupView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Third Hand is running").font(.title2.bold())
+            HStack(spacing: 12) {
+                Image(nsImage: NSApplication.shared.applicationIconImage).resizable().frame(width: 48, height: 48)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Third Hand").font(.title2.bold())
+                    Text(delegate.accessibilityReady && delegate.keyReady ? "Ready when you are" : "Let’s get set up")
+                        .foregroundStyle(.secondary)
+                }
+            }
             Text("Switch to Spotify, Blender, or another app, then press Control–Space. You can close this window; Third Hand stays in the menu bar.")
             HStack {
                 Text(delegate.accessibilityReady ? "✓ Accessibility enabled" : "Accessibility access needed")
                 Spacer()
-                Button("Open Settings") { delegate.openPrivacySettings("Privacy_Accessibility") }
+                Button(delegate.accessibilityReady ? "Settings…" : "Enable…") {
+                    if delegate.accessibilityReady { delegate.openPrivacySettings("Privacy_Accessibility") }
+                    else { delegate.promptAccessibility() }
+                }
             }
             HStack {
-                Text(delegate.screenReady ? "✓ Screen Recording enabled" : "Screen Recording needed for visual control")
+                Text(delegate.screenReady ? "✓ Screen Recording enabled" : "Screen Recording needed for local OCR")
                 Spacer()
-                Button("Open Settings") { delegate.openPrivacySettings("Privacy_ScreenCapture") }
+                Button(delegate.screenReady ? "Settings…" : "Enable…") {
+                    if delegate.screenReady { delegate.openPrivacySettings("Privacy_ScreenCapture") }
+                    else { delegate.promptScreenRecording() }
+                }
             }
             HStack {
                 Text(delegate.keyReady ? "✓ API key loaded" : "API key needs setup or Keychain approval")
                 Spacer()
                 Button("Set API Key…") { delegate.promptAPIKey() }
             }
+            Text(delegate.localTextStatus).font(.caption)
+            Text("Screen reading and text generation stay on-device. Jev receives text only.")
+                .font(.caption).foregroundStyle(.secondary)
             Text(delegate.shortcutReady ? "✓ Control–Space is ready" : "Shortcut waiting for Accessibility access")
                 .foregroundStyle(.secondary)
             Divider()
-            Text("Running copy: " + Bundle.main.bundlePath)
-                .font(.caption).textSelection(.enabled)
-            Text("If access stopped after an update, remove the old Accessibility entry and add this copy again.")
+            Text("If macOS asks you to quit and reopen after enabling access, reopen this copy of Third Hand.")
                 .font(.caption).foregroundStyle(.secondary)
+            Button("Show App in Finder") { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) }
+                .font(.caption)
         }
         .padding(24)
-        .frame(width: 510)
+        .frame(width: 540)
     }
 }

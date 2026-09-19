@@ -1,17 +1,19 @@
 import Foundation
 
+@MainActor
 final class CDPClient {
     private let port: Int
     private var webSocket: URLSessionWebSocketTask?
     private var nextId = 1
     private let session: URLSession
+    private var expectedFrame: CGRect?
 
     init(port: Int, session: URLSession = .shared) {
         self.port = port
         self.session = session
     }
 
-    func connect() async throws {
+    func connect(windowFrame: CGRect) async throws {
         struct Target: Decodable {
             let id: String
             let type: String
@@ -19,17 +21,23 @@ final class CDPClient {
             let webSocketDebuggerUrl: String?
         }
         let url = URL(string: "http://localhost:\(port)/json")!
-        let (data, _) = try await session.data(from: url)
+        let (data, _) = try await AsyncTimeout.run(seconds: 3, message: "Browser discovery timed out.") { [session] in
+            try await session.data(for: URLRequest(url: url, timeoutInterval: 3))
+        }
         let targets = try JSONDecoder().decode([Target].self, from: data)
-        guard let page = targets.first(where: { $0.type == "page" }),
+        let pages = targets.filter { $0.type == "page" }
+        guard pages.count == 1, let page = pages.first,
               let wsUrlString = page.webSocketDebuggerUrl,
-              let wsUrl = URL(string: wsUrlString) else {
-            throw ControllerError.invalid("No CDP page target found on port \(port)")
+              let wsUrl = URL(string: wsUrlString), wsUrl.scheme == "ws",
+              ["localhost", "127.0.0.1", "[::1]"].contains(wsUrl.host ?? ""), wsUrl.port == port else {
+            throw ControllerError.invalid("Browser target is missing or ambiguous; using accessibility.")
         }
         webSocket = session.webSocketTask(with: wsUrl)
         webSocket?.resume()
         _ = try await send(method: "Runtime.enable")
-        Log.info("CDP connected to \"\(page.title)\" via port \(port)")
+        expectedFrame = windowFrame
+        _ = try await extractElements()
+        Log.info("CDP connected to the verified focused page")
     }
 
     func disconnect() {
@@ -50,6 +58,13 @@ final class CDPClient {
             throw ControllerError.invalid("CDP DOM extraction returned no data")
         }
         let snapshot = try JSONDecoder().decode(DOMSnapshot.self, from: data)
+        guard let expectedFrame, snapshot.screen.focused,
+              abs(snapshot.screen.x - expectedFrame.minX) < 8,
+              abs(snapshot.screen.y - expectedFrame.minY) < 8,
+              abs(snapshot.screen.width - expectedFrame.width) < 8,
+              abs(snapshot.screen.height - expectedFrame.height) < 8 else {
+            throw ControllerError.invalid("Browser page does not match the focused app window")
+        }
         let originX = snapshot.screen.x
         let originY = snapshot.screen.y
         return snapshot.elements.map { el in
@@ -62,9 +77,10 @@ final class CDPClient {
                 actions: el.actions,
                 axElement: nil,
                 frame: CGRect(x: originX + el.rect.x,
-                              y: originY + el.rect.y,
+                              y: originY + max(0, snapshot.screen.height - snapshot.viewportHeight) + el.rect.y,
                               width: el.rect.w,
-                              height: el.rect.h)
+                              height: el.rect.h),
+                focused: el.focused
             )
         }
     }
@@ -73,6 +89,12 @@ final class CDPClient {
 
     private func send(method: String, params: [String: Any] = [:]) async throws -> [String: Any] {
         guard let ws = webSocket else { throw ControllerError.invalid("CDP not connected") }
+        return try await AsyncTimeout.run(seconds: 10, message: "Browser request timed out.", onTimeout: { self.disconnect() }) {
+            try await self.sendMessage(method: method, params: params, ws: ws)
+        }
+    }
+
+    private func sendMessage(method: String, params: [String: Any], ws: URLSessionWebSocketTask) async throws -> [String: Any] {
         let id = nextId
         nextId += 1
         let message: [String: Any] = ["id": id, "method": method, "params": params]
@@ -80,6 +102,7 @@ final class CDPClient {
         try await ws.send(.data(data))
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
+            try Task.checkCancellation()
             let msg = try await ws.receive()
             let msgData: Data
             switch msg {
@@ -106,6 +129,7 @@ final class CDPClient {
             let label: String?
             let value: String?
             let enabled: Bool
+            let focused: Bool
             let actions: [String]
             let rect: Rect
         }
@@ -113,10 +137,12 @@ final class CDPClient {
             let x: Double, y: Double, w: Double, h: Double
         }
         struct Screen: Decodable {
-            let x: Double, y: Double
+            let x: Double, y: Double, width: Double, height: Double
+            let focused: Bool
         }
         let elements: [Element]
         let screen: Screen
+        let viewportHeight: Double
     }
 
     // MARK: - DOM extraction script
@@ -163,7 +189,7 @@ final class CDPClient {
 
         function visible(el) {
             const r = el.getBoundingClientRect();
-            if (r.width <= 0 || r.height <= 0) return false;
+            if (r.width <= 0 || r.height <= 0 || r.right <= 0 || r.bottom <= 0 || r.left >= innerWidth || r.top >= innerHeight) return false;
             const s = getComputedStyle(el);
             return s.visibility !== 'hidden' && s.display !== 'none'
                 && parseFloat(s.opacity) > 0;
@@ -201,10 +227,11 @@ final class CDPClient {
                         id: nextId++, role: axRole, label: l, value: v,
                         enabled: !node.disabled
                             && node.getAttribute('aria-disabled') !== 'true',
+                        focused: node === document.activeElement,
                         actions: ['AXPress'],
                         rect: {x:r.x, y:r.y, w:r.width, h:r.height}
                     });
-                    return;
+                    // Keep descending: parent controls may contain editable children.
                 }
             }
 
@@ -217,7 +244,7 @@ final class CDPClient {
                         results.push({
                             id: nextId++, role: 'AXStaticText',
                             label: text.substring(0, 120), value: null,
-                            enabled: true, actions: [],
+                            enabled: true, focused: false, actions: [],
                             rect: {x:r.x, y:r.y, w:r.width, h:r.height}
                         });
                     }
@@ -229,8 +256,10 @@ final class CDPClient {
 
         walk(document.body || document.documentElement);
         return JSON.stringify({
-            elements: results,
-            screen: {x: window.screenX, y: window.screenY}
+            elements: results, viewportHeight: window.innerHeight,
+            screen: {x: window.screenX, y: window.screenY,
+                width: window.outerWidth, height: window.outerHeight,
+                focused: document.hasFocus() && document.visibilityState === 'visible'}
         });
     })()
     """#

@@ -4,34 +4,38 @@ import Vision
 enum VisionObserver {
 
     static func observe(pid: pid_t) async throws -> [AccessibilityElement] {
-        guard CGPreflightScreenCaptureAccess() else {
-            throw ControllerError.invalid("Screen Recording required for vision observation")
-        }
-        guard let front = WindowSnapshot.frontWindow(pid: pid) else {
-            throw ControllerError.invalid("No visible window for OCR")
-        }
-        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
-        guard let window = content.windows.first(where: { $0.windowID == front.id }) else {
-            throw ControllerError.invalid("Window unavailable for capture")
-        }
-        let filter = SCContentFilter(desktopIndependentWindow: window)
-        let config = SCStreamConfiguration()
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        config.width = max(1, Int(window.frame.width * scale))
-        config.height = max(1, Int(window.frame.height * scale))
-        config.showsCursor = false
-        config.ignoreShadowsSingleWindow = true
-        let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-        return extractElements(from: image, windowFrame: front.frame)
+        let snapshot = try await WindowSnapshot.capture(pid: pid)
+        guard let image = snapshot.image else { throw ControllerError.invalid("No local capture available") }
+        let result = try extractElements(from: image, windowFrame: snapshot.frame)
+        guard let current = WindowSnapshot.frontWindow(pid: pid), current.id == snapshot.windowID,
+              current.frame == snapshot.frame else { throw ControllerError.invalid("Window changed during local OCR") }
+        return result
     }
 
-    private static func extractElements(from image: CGImage, windowFrame: CGRect) -> [AccessibilityElement] {
+    /// OCR contributes text regions, never invented buttons or text fields.
+    static func merging(ocr: [AccessibilityElement], with controls: [AccessibilityElement]) -> [AccessibilityElement] {
+        var result = controls
+        var nextID = (controls.map(\.id).max() ?? 0) + 1
+        for text in ocr {
+            let duplicate = controls.contains { control in
+                guard let a = control.frame, let b = text.frame else { return false }
+                return a.intersects(b) && control.displayLabel.localizedCaseInsensitiveContains(text.displayLabel)
+            }
+            guard !duplicate else { continue }
+            result.append(AccessibilityElement(id: nextID, role: "AXStaticText", label: text.label,
+                value: nil, enabled: true, actions: [], axElement: nil, frame: text.frame, source: "ocr"))
+            nextID += 1
+        }
+        return result
+    }
+
+    static func extractElements(from image: CGImage, windowFrame: CGRect) throws -> [AccessibilityElement] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
 
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        try? handler.perform([request])
+        try handler.perform([request])
 
         guard let results = request.results else { return [] }
 
@@ -40,7 +44,7 @@ enum VisionObserver {
 
         for observation in results.prefix(500) {
             guard let candidate = observation.topCandidates(1).first,
-                  candidate.confidence > 0.3 else { continue }
+                  candidate.confidence >= 0.8 else { continue }
 
             let box = observation.boundingBox
             let screenRect = CGRect(
@@ -53,16 +57,16 @@ enum VisionObserver {
             let text = candidate.string.trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { continue }
 
-            let isControl = text.count < 40
             elements.append(AccessibilityElement(
                 id: nextId,
-                role: isControl ? "AXButton" : "AXStaticText",
+                role: "AXStaticText",
                 label: text,
                 value: nil,
                 enabled: true,
-                actions: isControl ? ["AXPress"] : [],
+                actions: [],
                 axElement: nil,
-                frame: screenRect
+                frame: screenRect,
+                source: "ocr"
             ))
             nextId += 1
         }

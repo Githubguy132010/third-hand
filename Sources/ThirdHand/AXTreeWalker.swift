@@ -10,21 +10,40 @@ enum AXTreeWalker {
         AXUIElementSetMessagingTimeout(target.appElement, 0.1)
         var focused: CFTypeRef?
         AXUIElementCopyAttributeValue(target.appElement, kAXFocusedWindowAttribute as CFString, &focused)
-        let root = focused.map { $0 as! AXUIElement } ?? target.appElement
+        let root: AXUIElement
+        if let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() {
+            root = focused as! AXUIElement
+        } else { root = target.appElement }
 
-        enumerate(root, depth: 0, maxDepth: 30, elements: &elements, nextId: &nextId, visited: &visited, deadline: deadline, limit: 500)
+        enumerate(root, depth: 0, maxDepth: 30, elements: &elements, nextId: &nextId, visited: &visited, deadline: deadline, limit: 1200)
 
         if elements.isEmpty {
             var winVal: AnyObject?
             AXUIElementCopyAttributeValue(target.appElement, kAXWindowsAttribute as CFString, &winVal)
             if let windows = winVal as? [AXUIElement] {
                 for win in windows {
-                    enumerate(win, depth: 0, maxDepth: 30, elements: &elements, nextId: &nextId, visited: &visited, deadline: deadline, limit: 500)
+                    enumerate(win, depth: 0, maxDepth: 30, elements: &elements, nextId: &nextId, visited: &visited, deadline: deadline, limit: 1200)
                 }
             }
         }
 
-        Log.info("AXWalk: \(elements.count) elements for \(target.name)")
+        // Prioritize actual controls over static labels when the model's window is full.
+        let beforeFiltering = elements.count
+        let window = WindowSnapshot.frontWindow(pid: target.pid)?.frame
+        elements = elements.filter { element in
+            guard let frame = element.frame, let window else { return true }
+            return window.intersects(frame)
+        }
+        func priority(_ element: AccessibilityElement) -> Int {
+            if element.focused { return 0 }
+            if ["AXTextField", "AXTextArea", "AXComboBox"].contains(element.role) { return 1 }
+            return element.role == "AXStaticText" ? 3 : 2
+        }
+        elements = Array(elements.sorted {
+            let lhs = priority($0), rhs = priority($1)
+            return lhs == rhs ? $0.id < $1.id : lhs < rhs
+        }.prefix(500))
+        Log.info("AXWalk: \(elements.count) elements for \(target.name) before_filter=\(beforeFiltering) visited=\(visited) budget_exhausted=\(Date() >= deadline)")
         return elements
     }
 
@@ -48,7 +67,7 @@ enum AXTreeWalker {
 
         // Fetch metadata together instead of making a separate cross-process call per attribute.
         let keys = [kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute,
-                    kAXRoleDescriptionAttribute, kAXValueAttribute, kAXEnabledAttribute, kAXChildrenAttribute]
+                    kAXRoleDescriptionAttribute, kAXValueAttribute, kAXEnabledAttribute, kAXChildrenAttribute, kAXFocusedAttribute]
         var batch: CFArray?
         let result = AXUIElementCopyMultipleAttributeValues(element, keys as CFArray, [], &batch)
         let values = batch as? [AnyObject]
@@ -84,7 +103,8 @@ enum AXTreeWalker {
                 enabled: enabled,
                 actions: actions,
                 axElement: element,
-                frame: nil
+                frame: InputController.frame(element),
+                focused: (attribute(kAXFocusedAttribute) as? Bool) ?? false
             ))
             nextId += 1
         }

@@ -13,7 +13,7 @@ enum InputController {
         "f9":101,"f10":109,"f11":103,"f12":111
     ]
 
-    static func frame(_ element: AXUIElement) -> CGRect? {
+    nonisolated static func frame(_ element: AXUIElement) -> CGRect? {
         var pos: CFTypeRef?
         var size: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &pos) == .success,
@@ -52,19 +52,30 @@ enum InputController {
         up.post(tap: .cghidEventTap)
     }
 
-    static func type(_ text: String) throws {
+    static func type(_ text: String, check: () throws -> Void) async throws {
         // Unicode events avoid changing or leaking the user's clipboard.
-        for character in text {
-            let units = Array(String(character).utf16)
-            guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
-                  let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { throw ControllerError.invalid("Cannot create text event") }
-            units.withUnsafeBufferPointer { buffer in
-                down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: buffer.baseAddress)
-                up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: buffer.baseAddress)
-            }
+        for (index, character) in text.enumerated() {
+            if index % 16 == 0 { await Task.yield() }
+            try Task.checkCancellation()
+            try check()
+            let (down, up) = try textEvents(for: character)
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
         }
+    }
+
+    static func textEvents(for character: Character) throws -> (CGEvent, CGEvent) {
+        let units = Array(String(character).utf16)
+        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { throw ControllerError.invalid("Cannot create text event") }
+        // A preceding Command-A must not turn Unicode input into shortcuts.
+        down.flags = []
+        up.flags = []
+        units.withUnsafeBufferPointer { buffer in
+            down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: buffer.baseAddress)
+            up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: buffer.baseAddress)
+        }
+        return (down, up)
     }
 
     static func scroll(_ delta: Int32, at point: CGPoint) throws {

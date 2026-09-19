@@ -5,3 +5,11 @@ Third Hand.app/
 .swiftpm/
 
 .thirdhand-signing-identity
+
+# Local credentials and diagnostics
+.env
+.env.*
+*.log
+*.p12
+*.pfx
+*.key

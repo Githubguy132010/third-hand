@@ -2,17 +2,38 @@ import XCTest
 import ApplicationServices
 @testable import ThirdHand
 
+@MainActor
 final class ControllerTests: XCTestCase {
     private func element(enabled: Bool = true) -> AccessibilityElement {
         AccessibilityElement(id: 1, role: "AXTextField", label: "Search", value: "", enabled: enabled,
                              actions: [], axElement: AXUIElementCreateSystemWide())
     }
 
-    func testGeneratedTextPreservesFullPhrase() throws {
-        let payload = #"{"choices":[{"message":{"content":"{\"operation\":\"TYPE_TEXT\",\"targetIndex\":\"1\",\"textValue\":\"Boards of Canada – Music Has the Right to Children\"}"}}]}"#
-        let decision = try OpenRouterClient.decode(Data(payload.utf8))
-        XCTAssertEqual(decision.textValue, "Boards of Canada – Music Has the Right to Children")
-        try decision.validate(elements: [element()], hasScreenshot: false)
+    func testUnicodeTypingEventsHaveNoShortcutModifiers() throws {
+        for character: Character in ["a", "é", "🎵"] {
+            let (down, up) = try InputController.textEvents(for: character)
+            XCTAssertEqual(down.flags, [])
+            XCTAssertEqual(up.flags, [])
+            var buffer = [UniChar](repeating: 0, count: 8)
+            var count = 0
+            down.keyboardGetUnicodeString(maxStringLength: buffer.count, actualStringLength: &count, unicodeString: &buffer)
+            XCTAssertEqual(String(utf16CodeUnits: buffer, count: count), String(character))
+        }
+    }
+
+    func testWindowSelectionIgnoresFrontmostTemporaryWindow() {
+        let main = CGRect(x: -1200, y: 25, width: 1200, height: 800)
+        let popup = CGRect(x: -700, y: 80, width: 200, height: 30)
+        let selected = WindowSnapshot.selectWindow([(2, popup), (1, main)], focusedFrame: main)
+        XCTAssertEqual(selected?.id, 1)
+        XCTAssertEqual(selected?.frame, main)
+    }
+
+    func testWindowSelectionRejectsUnrelatedWindowWhenFocusedWindowIsUnavailable() {
+        let other = CGRect(x: 0, y: 0, width: 200, height: 100)
+        let focused = CGRect(x: 500, y: 100, width: 1200, height: 800)
+        XCTAssertNil(WindowSnapshot.selectWindow([(2, other)], focusedFrame: focused))
+        XCTAssertEqual(WindowSnapshot.selectWindow([(2, other)], focusedFrame: nil)?.id, 2)
     }
 
     func testRejectsMissingTextAndInvalidTargets() {
@@ -42,102 +63,32 @@ final class ControllerTests: XCTestCase {
         XCTAssertThrowsError(try AgentDecision(operation: "KEY_PRESS", key: "a", modifiers: ["invalid"]).validate(elements: [], hasScreenshot: false))
     }
 
+    func testOCRLabelsCannotBecomeClickTargetsWithoutVisualGrounding() {
+        let label = AccessibilityElement(id: 1, role: "AXStaticText", label: "Search", value: nil, enabled: true, actions: [], axElement: nil)
+        XCTAssertThrowsError(try AgentDecision(operation: "CLICK", targetIndex: "1").validate(elements: [label], hasScreenshot: false))
+        XCTAssertThrowsError(try AgentDecision(operation: "CLICK", targetIndex: "1", x: 0.5, y: 0.5).validate(elements: [label], hasScreenshot: true))
+    }
+
     func testCoordinatesOnDisplayLeftOfPrimary() {
-        let snapshot = WindowSnapshot(windowID: 1, frame: CGRect(x: -1920, y: 100, width: 1000, height: 800), base64JPEG: "")
+        let snapshot = WindowSnapshot(windowID: 1, frame: CGRect(x: -1920, y: 100, width: 1000, height: 800), image: nil)
         XCTAssertEqual(snapshot.point(x: 0, y: 0), CGPoint(x: -1920, y: 100))
         XCTAssertEqual(snapshot.point(x: 1, y: 1), CGPoint(x: -921, y: 899))
         XCTAssertTrue(snapshot.frame.contains(snapshot.point(x: 1, y: 1)))
     }
 
-    func testMalformedResponseFailsCleanly() {
-        for payload in ["{}", "not json", #"{"choices":[]}"#] {
-            XCTAssertThrowsError(try OpenRouterClient.decode(Data(payload.utf8)))
+    func testMalformedJevResponseFailsCleanly() {
+        for payload in ["{}", "not json", #"{"answers":{}}"#] {
+            XCTAssertThrowsError(try JevClient.decode(Data(payload.utf8), elements: []))
         }
     }
 
-    func testChatRequestIncludesContextAndImage() async throws {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockProtocol.self]
-        let client = OpenRouterClient(apiKey: "test-key", baseURL: "https://example.invalid/api/v1", session: URLSession(configuration: config))
-        let result = try await client.decide(goal: "Search for Boards of Canada", elements: [], appName: "Spotify", screenshot: "aW1hZ2U=")
-        XCTAssertEqual(result.operation, "CLICK")
+    func testOCRTextUsesExplicitClickTextRatherThanPretendingToBeAButton() throws {
+        let text = AccessibilityElement(id: 10, role: "AXStaticText", label: "Save", value: nil,
+            enabled: true, actions: [], axElement: nil, frame: CGRect(x: 20, y: 20, width: 40, height: 20), source: "ocr")
+        XCTAssertNil(JevClient.targets([text])["CLICK"])
+        XCTAssertNil(JevClient.targets([text])["TYPE_TEXT"])
+        XCTAssertNotNil(JevClient.targets([text])["CLICK_TEXT"]?["10"])
+        try AgentDecision(operation: "CLICK_TEXT", targetIndex: "10").validate(elements: [text], hasScreenshot: false)
+        XCTAssertThrowsError(try AgentDecision(operation: "CLICK_TEXT", targetIndex: "1").validate(elements: [element()], hasScreenshot: false))
     }
-    func testSchemaRequiresTargetFieldsAndRestrictsObservedIDs() throws {
-        let format = OpenRouterClient.responseFormat(elements: [element(), element(enabled: false)])
-        XCTAssertEqual(format["type"] as? String, "json_schema")
-        let wrapper = format["json_schema"] as! [String: Any]
-        XCTAssertEqual(wrapper["strict"] as? Bool, true)
-        let schema = wrapper["schema"] as! [String: Any]
-        let required = schema["required"] as! [String]
-        XCTAssertTrue(["targetIndex", "x", "y", "textValue"].allSatisfy(required.contains))
-        let properties = schema["properties"] as! [String: Any]
-        let target = properties["targetIndex"] as! [String: Any]
-        let ids = target["enum"] as! [Any]
-        XCTAssertEqual(ids.compactMap { $0 as? String }, ["1"])
-        XCTAssertTrue(ids.last is NSNull)
-    }
-
-    func testMissingTargetIsCorrectedBeforeReturningAction() async throws {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockProtocol.self]
-        let client = OpenRouterClient(apiKey: "test-key", baseURL: "https://recover.invalid/api/v1", session: URLSession(configuration: config))
-        let result = try await client.decide(goal: "Search for Boards of Canada", elements: [], appName: "Spotify", screenshot: "aW1hZ2U=")
-        XCTAssertEqual(result.x, 0.5)
-        XCTAssertEqual(result.y, 0.5)
-    }
-
-    func testRepeatedMissingTargetsStopAfterBoundedRetries() async throws {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockProtocol.self]
-        let client = OpenRouterClient(apiKey: "test-key", baseURL: "https://reject.invalid/api/v1", session: URLSession(configuration: config))
-        do {
-            _ = try await client.decide(goal: "Search for Boards of Canada", elements: [], appName: "Spotify", screenshot: "aW1hZ2U=")
-            XCTFail("Invalid actions must never reach the executor")
-        } catch {
-            XCTAssertTrue(error.localizedDescription.contains("after 3 attempts"))
-        }
-    }
-
-}
-
-private final class MockProtocol: URLProtocol {
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func startLoading() {
-        XCTAssertEqual(request.url?.path, "/api/v1/chat/completions")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-key")
-        var data = request.httpBody ?? Data()
-        if let stream = request.httpBodyStream {
-            stream.open()
-            defer { stream.close() }
-            var buffer = [UInt8](repeating: 0, count: 4096)
-            while stream.hasBytesAvailable {
-                let count = stream.read(&buffer, maxLength: buffer.count)
-                if count <= 0 { break }
-                data.append(contentsOf: buffer.prefix(count))
-            }
-        }
-        let body = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
-        XCTAssertEqual(body["model"] as? String, OpenRouterClient.defaultModel)
-        XCTAssertEqual((body["response_format"] as? [String: Any])?["type"] as? String, "json_schema")
-        XCTAssertEqual((body["provider"] as? [String: Bool])?["require_parameters"], true)
-        let messages = body["messages"] as! [[String: Any]]
-        XCTAssertLessThanOrEqual(messages.count, 4)
-        if messages.count > 2 {
-            XCTAssertTrue((messages.last?["content"] as? String)?.contains("Missing action target") == true)
-        }
-        let content = messages[1]["content"] as! [[String: Any]]
-        XCTAssertTrue((content[0]["text"] as! String).contains("Boards of Canada"))
-        XCTAssertEqual((content[1]["image_url"] as! [String: String])["url"], "data:image/jpeg;base64,aW1hZ2U=")
-        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        if request.url?.host == "reject.invalid" || (request.url?.host == "recover.invalid" && messages.count == 2) {
-            client?.urlProtocol(self, didLoad: Data(#"{"choices":[{"message":{"content":"{\"operation\":\"TYPE_TEXT\",\"textValue\":\"Boards of Canada\"}"}}]}"#.utf8))
-            client?.urlProtocolDidFinishLoading(self)
-            return
-        }
-        client?.urlProtocol(self, didLoad: Data(#"{"choices":[{"message":{"content":"{\"operation\":\"CLICK\",\"x\":0.5,\"y\":0.5}"}}]}"#.utf8))
-        client?.urlProtocolDidFinishLoading(self)
-    }
-    override func stopLoading() {}
 }

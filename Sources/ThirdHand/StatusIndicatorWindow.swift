@@ -49,12 +49,10 @@ final class StatusIndicatorWindow: NSPanel {
     }
 
     func showError(_ msg: String) {
-        setContentSize(NSSize(width: 420, height: 110))
-        hosting.rootView = StatusView(text: "✗ " + msg, showSpinner: false, onCancel: {})
+        setContentSize(NSSize(width: 420, height: 160))
+        hosting.rootView = StatusView(text: "✗ " + msg, showSpinner: false, onCancel: { [weak self] in self?.dismiss() })
         orderFront(nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
-            self?.dismiss()
-        }
+        // Keep the blocker visible until dismissed or another task begins.
     }
 
     func dismiss() {
@@ -83,9 +81,9 @@ private struct StatusView: View {
             Text(text)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(.white.opacity(0.85))
-                .lineLimit(showSpinner ? 1 : 5)
+                .lineLimit(showSpinner ? 1 : 8)
             Spacer()
-            if showSpinner {
+            Group {
                 Button(action: onCancel) {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .bold))

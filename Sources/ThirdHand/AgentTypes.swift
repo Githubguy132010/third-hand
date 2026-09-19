@@ -11,11 +11,24 @@ struct AgentDecision: Codable, Equatable {
     var reason: String? = nil
 
     func validate(elements: [AccessibilityElement], hasScreenshot: Bool) throws {
-        let operations = ["CLICK", "DOUBLE_CLICK", "RIGHT_CLICK", "TYPE_TEXT", "KEY_PRESS", "SCROLL_UP", "SCROLL_DOWN", "WAIT", "DONE", "BLOCKED"]
+        let operations = ["CLICK", "CLICK_TEXT", "DOUBLE_CLICK", "RIGHT_CLICK", "TYPE_TEXT", "KEY_PRESS", "SCROLL_UP", "SCROLL_DOWN", "WAIT", "DONE", "BLOCKED"]
         guard operations.contains(operation) else { throw ControllerError.invalid("Unknown operation") }
         if let targetIndex {
             guard elements.contains(where: { String($0.id) == targetIndex && $0.enabled }) else {
                 throw ControllerError.invalid("Invalid or disabled target")
+            }
+        }
+        if targetIndex != nil && (x != nil || y != nil) {
+            throw ControllerError.invalid("Choose either an observed target or image coordinates")
+        }
+        if ["CLICK", "DOUBLE_CLICK", "RIGHT_CLICK"].contains(operation), let targetIndex {
+            guard JevClient.targets(elements)["CLICK"]?[targetIndex] != nil else {
+                throw ControllerError.invalid("Selected text is not an observed interactive control; use image coordinates only if the screenshot shows a control")
+            }
+        }
+        if operation == "CLICK_TEXT" {
+            guard let targetIndex, JevClient.targets(elements)["CLICK_TEXT"]?[targetIndex] != nil else {
+                throw ControllerError.invalid("Click-text requires a current locally observed OCR region")
             }
         }
         if x != nil || y != nil {
@@ -24,7 +37,7 @@ struct AgentDecision: Codable, Equatable {
                 throw ControllerError.invalid("Invalid screenshot coordinates")
             }
         }
-        if ["CLICK", "DOUBLE_CLICK", "RIGHT_CLICK", "TYPE_TEXT"].contains(operation) {
+        if ["CLICK", "CLICK_TEXT", "DOUBLE_CLICK", "RIGHT_CLICK", "TYPE_TEXT"].contains(operation) {
             guard targetIndex != nil || (x != nil && y != nil) else { throw ControllerError.invalid("Missing action target") }
         }
         if operation == "TYPE_TEXT" {
