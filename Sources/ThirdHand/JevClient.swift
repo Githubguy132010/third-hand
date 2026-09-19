@@ -1,277 +1,188 @@
 import Foundation
-import ApplicationServices
 
-struct JevDecision {
-    let operation: String
-    let targetIndex: String?
-    let textValue: String?
-    let confidence: Double
+struct JevResult {
+    let decision: AgentDecision
+    let done: Double
+    let absent: Double
+    let pickedNone: Bool
+    let latencyMs: Int
 }
-
-enum JevError: LocalizedError {
-    case apiError(Int, String)
-    case parseError(String)
-    case noAPIKey
-
-    var errorDescription: String? {
-        switch self {
-        case .apiError(let c, let b): return "API \(c): \(b)"
-        case .parseError(let c): return "Parse: \(c)"
-        case .noAPIKey: return "No API key"
-        }
-    }
-}
-
-struct ActionHistory {
-    let action: String
-    let kind: String
-    let text: String
-    let pageChanged: Bool
-}
-
-private let NEXT_ACTION = """
-    Advance the user's entire goal using one operation.
-    Use current field values and action history. Do not repeat satisfied steps.
-    Do not toggle a checkbox or switch already in the requested state.
-    WAIT only when needed control is absent/disabled or results are still loading.
-    DONE requires visible evidence that ALL requirements are satisfied.
-    BLOCKED means no supported operation can make progress.
-    """
-
-private let TARGET = """
-    Choose the best observed target for the specified operation.
-    Use the user's goal, field values, and recent actions.
-    Do not choose a field that already contains the requested value.
-    Choose only an offered element index.
-    """
 
 final class JevClient {
     private let apiKey: String
-    private let baseURL: String
-    private let model: String
     private let session: URLSession
+    private let endpoint: URL
 
-    init(apiKey: String, baseURL: String = "https://openrouter.ai/api/v1", model: String = "typesafe/jev-1.13") {
+    static let doneThreshold = 0.70
+    static let absentThreshold = 0.50
+    private static let noneKey = "__none__"
+
+    init(apiKey: String, session: URLSession = .shared,
+         endpoint: URL = URL(string: "https://api.typesafe.ai/v1/systemone")!) {
         self.apiKey = apiKey
-        self.baseURL = baseURL
-        self.model = model
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 25
-        self.session = URLSession(configuration: config)
+        self.session = session
+        self.endpoint = endpoint
     }
 
-    func decide(
-        goal: String,
-        elements: [AccessibilityElement],
-        appName: String,
-        history: [ActionHistory] = []
-    ) async throws -> JevDecision {
-        let (tsElements, targets) = buildActionSpace(elements)
+    static func targets(_ elements: [AccessibilityElement]) -> [String: [String: AccessibilityElement]] {
+        var click: [String: AccessibilityElement] = [:]
+        var type: [String: AccessibilityElement] = [:]
+        let clickRoles: Set<String> = [
+            "AXButton", "AXMenuItem", "AXMenuBarItem", "AXLink", "AXTab",
+            "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXRow", "AXCell",
+            "AXDisclosureTriangle", "AXSwitch"
+        ]
+        for element in elements where element.enabled {
+            let id = String(element.id)
+            if ["AXTextField", "AXTextArea", "AXComboBox"].contains(element.role) {
+                type[id] = element
+                click[id] = element
+            } else if clickRoles.contains(element.role) ||
+                      element.actions.contains(where: { ["AXPress", "AXOpen", "AXConfirm", "AXPick"].contains($0) }) {
+                click[id] = element
+            }
+        }
+        var result: [String: [String: AccessibilityElement]] = [:]
+        if !click.isEmpty { result["CLICK"] = click }
+        if !type.isEmpty { result["TYPE_TEXT"] = type }
+        return result
+    }
 
-        // Build the TypeSafe System One request body
-        var operationCriteria: [String: String] = [:]
-        if targets["CLICK"] != nil {
-            operationCriteria["CLICK"] = "Click an element, button, menu option, or row."
+    static func requestBody(goal: String, elements: [AccessibilityElement], appName: String, history: [ActionHistory]) -> [String: Any] {
+        let targets = targets(elements)
+
+        var operations: [String: String] = [
+            "SCROLL_UP": "Reveal content above",
+            "SCROLL_DOWN": "Reveal content below",
+            "PRESS_RETURN": "Submit the focused field or confirm the selected item",
+            "PRESS_ESCAPE": "Dismiss the current popup or menu",
+            "WAIT": "Wait for content to load",
+            "DONE": "All requirements are visibly satisfied on screen",
+            "BLOCKED": "No available operation can make progress"
+        ]
+        for op in targets.keys {
+            operations[op] = op == "TYPE_TEXT"
+                ? "Set text in an editable field"
+                : "Click an observed enabled control"
         }
-        if targets["TYPE_TEXT"] != nil {
-            operationCriteria["TYPE_TEXT"] = "Enter or replace text in an editable field."
-        }
-        operationCriteria["SCROLL_UP"] = "Scroll the view up to reveal content above."
-        operationCriteria["SCROLL_DOWN"] = "Scroll the view down to reveal content below."
-        operationCriteria["DONE"] = "Every requirement is visibly satisfied."
-        operationCriteria["BLOCKED"] = "No supported operation can progress."
+
+        let state: [String: Any] = [
+            "task": goal,
+            "app": appName,
+            "step": history.count + 1,
+            "already_done": history.isEmpty
+                ? ["nothing yet"] as [Any]
+                : history.suffix(8).map { "\($0.action): \($0.result)" } as [Any],
+            "elements": elements.map { el in
+                var desc: [String: Any] = ["id": String(el.id), "label": el.displayLabel, "role": el.displayRole]
+                if let v = el.value, !v.isEmpty, v != el.label { desc["value"] = v }
+                return desc
+            }
+        ]
 
         var questions: [String: Any] = [
+            "done": [
+                "type": "noul",
+                "instructions": "Has this task been completed: \"\(goal)\"? Judge only by what is visible on screen and actions already taken."
+            ] as [String: Any],
+            "absent": [
+                "type": "noul",
+                "instructions": "Is the control needed for the next step of \"\(goal)\" missing from the elements on screen?"
+            ] as [String: Any],
             "operation": [
                 "type": "choice",
-                "criteria": operationCriteria,
-                "instructions": ["goal": goal, "rules": NEXT_ACTION],
-            ] as [String: Any],
+                "criteria": operations,
+                "instructions": "Which operation advances \"\(goal)\" one step? Do not repeat completed steps. DONE requires visible evidence."
+            ] as [String: Any]
         ]
 
-        for (operation, opTargets) in targets {
-            var criteria: [String: Any] = [:]
-            for (index, elem) in opTargets {
-                criteria[index] = [
-                    "element": "[\(index)] \(elem.displayLabel)",
-                    "role": elem.displayRole,
-                    "current_value": elem.value ?? "",
-                ] as [String: String]
+        for (op, candidates) in targets {
+            var criteria: [String: String] = [:]
+            for (id, el) in candidates {
+                var desc = el.displayLabel
+                if let v = el.value, !v.isEmpty, v != el.label { desc += " = \(v)" }
+                desc += " [\(el.displayRole)]"
+                criteria[id] = desc
             }
-            questions[operation.lowercased() + "_target"] = [
+            criteria[noneKey] = "None of these — the needed control is not on screen"
+            questions[op.lowercased() + "_target"] = [
                 "type": "choice",
                 "criteria": criteria,
-                "instructions": ["goal": goal, "operation": operation, "rules": [NEXT_ACTION, TARGET]],
+                "instructions": "Which element should be the target for \(op) to advance \"\(goal)\"?"
             ] as [String: Any]
         }
 
-        if targets["TYPE_TEXT"] != nil {
-            var textCriteria: [String: String] = [:]
-            let candidates = generateTextCandidates(goal: goal)
-            for (i, text) in candidates.enumerated() {
-                textCriteria["t\(i)"] = text
-            }
-            questions["type_text_value"] = [
-                "type": "choice",
-                "criteria": textCriteria,
-                "instructions": ["goal": goal, "rules": "Pick the text that should be typed into the field to advance the goal. Choose the most specific and relevant text."],
-            ] as [String: Any]
-        }
-
-        let recentActions: [[String: Any]] = history.suffix(10).map { h in
-            ["action": h.action, "kind": h.kind, "text": h.text, "page_changed": h.pageChanged]
-        }
-
-        let body: [String: Any] = [
-            "model": model,
-            "state": [
-                "page": ["url": "", "title": appName, "text": ""],
-                "elements": tsElements,
-                "recent_actions": recentActions,
-            ] as [String: Any],
-            "questions": questions,
-        ]
-
-        var req = URLRequest(url: URL(string: "https://openrouter.ai/api/alpha/decisions")!)
-        req.httpMethod = "POST"
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        Log.info("Jev request: \(tsElements.count) elements, \(targets.count) op types, questions: \(Array(questions.keys))")
-        if let bodyStr = String(data: req.httpBody ?? Data(), encoding: .utf8) {
-            Log.info("Jev body (first 800): \(String(bodyStr.prefix(800)))")
-        }
-
-        let (data, resp) = try await session.data(for: req)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        let responseBody = String(data: data, encoding: .utf8) ?? ""
-
-        Log.info("Jev response \(code): \(String(responseBody.prefix(600)))")
-
-        if code != 200 {
-            throw JevError.apiError(code, responseBody)
-        }
-
-        let textCandidates = targets["TYPE_TEXT"] != nil ? generateTextCandidates(goal: goal) : []
-        return try parseResponse(data: data, targets: targets, textCandidates: textCandidates)
+        return ["model": "jev-latest", "questions": questions, "state": state]
     }
 
-    private func buildActionSpace(_ elements: [AccessibilityElement]) -> ([[String: Any]], [String: [String: AccessibilityElement]]) {
-        var tsElements: [[String: Any]] = []
-        var clickTargets: [String: AccessibilityElement] = [:]
-        var typeTargets: [String: AccessibilityElement] = [:]
-
-        let clickActions: Set<String> = [
-            kAXPressAction as String,
-            "AXOpen",
-            "AXConfirm",
-            "AXPick",
-        ]
-
-        for elem in elements {
-            let index = String(elem.id)
-            var operations: [String] = []
-            let canClick = !elem.actions.filter({ clickActions.contains($0) }).isEmpty || isClickableRole(elem.role)
-            let isTextField = elem.role == "AXTextField" || elem.role == "AXTextArea" || elem.role == "AXComboBox"
-
-            if canClick { operations.append("CLICK"); clickTargets[index] = elem }
-            if isTextField {
-                if !canClick { operations.append("CLICK"); clickTargets[index] = elem }
-                operations.append("TYPE_TEXT"); typeTargets[index] = elem
-            }
-            guard !operations.isEmpty else { continue }
-
-            var d: [String: Any] = ["index": index, "label": elem.displayLabel, "role": elem.displayRole, "operations": operations]
-            if let v = elem.value, !v.isEmpty { d["value"] = v }
-            tsElements.append(d)
+    func decide(goal: String, elements: [AccessibilityElement], appName: String, history: [ActionHistory]) async throws -> JevResult {
+        var request = URLRequest(url: endpoint, timeoutInterval: 15)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body = Self.requestBody(goal: goal, elements: elements, appName: appName, history: history)
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let start = Date()
+        let (data, response) = try await session.data(for: request)
+        try Task.checkCancellation()
+        let ms = Int(Date().timeIntervalSince(start) * 1000)
+        Log.info("Timing jev_ms=\(ms)")
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let body = String(data: data, encoding: .utf8) ?? ""
+            Log.info("Jev error \(code): \(body.prefix(200))")
+            throw ControllerError.invalid("Jev unavailable (HTTP \(code))")
         }
-
-        var targets: [String: [String: AccessibilityElement]] = [:]
-        if !clickTargets.isEmpty { targets["CLICK"] = clickTargets }
-        if !typeTargets.isEmpty { targets["TYPE_TEXT"] = typeTargets }
-        return (tsElements, targets)
+        return try Self.decode(data, elements: elements, latencyMs: ms)
     }
 
-    private func generateTextCandidates(goal: String) -> [String] {
-        var candidates: [String] = [goal]
-        let words = goal.split(separator: " ").map(String.init)
-        // Add individual meaningful words (skip short/common ones)
-        let stopWords: Set<String> = ["go", "to", "the", "a", "an", "and", "or", "in", "on", "for", "of", "open", "find", "search", "click", "navigate", "type", "enter", "play", "start", "set", "change", "my", "its", "is", "it"]
-        let meaningful = words.filter { $0.count > 1 && !stopWords.contains($0.lowercased()) }
-        for w in meaningful { candidates.append(w) }
-        // Add consecutive pairs
-        if meaningful.count >= 2 {
-            for i in 0..<(meaningful.count - 1) {
-                candidates.append("\(meaningful[i]) \(meaningful[i+1])")
+    static func decode(_ data: Data, elements: [AccessibilityElement], latencyMs: Int = 0) throws -> JevResult {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let answers = json["answers"] as? [String: Any] else {
+            throw ControllerError.invalid("Invalid Jev response")
+        }
+
+        let done = (answers["done"] as? [String: Any])?["noul"] as? Double ?? 0
+        let absent = (answers["absent"] as? [String: Any])?["noul"] as? Double ?? 0
+
+        guard let opAnswer = answers["operation"] as? [String: Any],
+              let opChoice = opAnswer["choice"] as? String else {
+            throw ControllerError.invalid("Missing operation in Jev response")
+        }
+
+        let targets = targets(elements)
+
+        if let candidates = targets[opChoice] {
+            let key = opChoice.lowercased() + "_target"
+            guard let tgtAnswer = answers[key] as? [String: Any],
+                  let tgtChoice = tgtAnswer["choice"] as? String else {
+                throw ControllerError.invalid("Missing target for \(opChoice)")
             }
-        }
-        // Add all meaningful words joined
-        if meaningful.count >= 2 {
-            candidates.append(meaningful.joined(separator: " "))
-        }
-        // Deduplicate preserving order
-        var seen = Set<String>()
-        return candidates.filter { seen.insert($0.lowercased()).inserted }.prefix(15).map { $0 }
-    }
-
-    private func isClickableRole(_ role: String) -> Bool {
-        switch role {
-        case "AXButton", "AXMenuItem", "AXMenuBarItem", "AXLink",
-             "AXTab", "AXCheckBox", "AXRadioButton", "AXPopUpButton",
-             "AXRow", "AXOutlineRow", "AXTableRow", "AXCell",
-             "AXDisclosureTriangle", "AXToolbarButton", "AXMenuButton",
-             "AXSwitch", "AXStaticText":
-            return true
-        default:
-            return false
-        }
-    }
-
-    private func parseResponse(data: Data, targets: [String: [String: AccessibilityElement]], textCandidates: [String]) throws -> JevDecision {
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw JevError.parseError(String(data: data, encoding: .utf8) ?? "")
-        }
-
-        // Direct TypeSafe format: {answers: {operation: {choice, confidence, probabilities}}}
-        if let answers = json["answers"] as? [String: Any],
-           let opAnswer = answers["operation"] as? [String: Any],
-           let operation = opAnswer["choice"] as? String,
-           let confidence = opAnswer["confidence"] as? Double {
-            var targetIndex: String? = nil
-            if targets[operation] != nil {
-                let key = operation.lowercased() + "_target"
-                if let ta = answers[key] as? [String: Any], let c = ta["choice"] as? String {
-                    targetIndex = c
-                }
+            if tgtChoice == noneKey {
+                return JevResult(
+                    decision: AgentDecision(operation: "BLOCKED", reason: "Target not visible on screen"),
+                    done: done, absent: absent, pickedNone: true, latencyMs: latencyMs
+                )
             }
-            var textValue: String? = nil
-            if operation == "TYPE_TEXT",
-               let tv = answers["type_text_value"] as? [String: Any],
-               let choiceKey = tv["choice"] as? String,
-               let idx = Int(choiceKey.dropFirst()),
-               idx < textCandidates.count {
-                textValue = textCandidates[idx]
+            guard candidates[tgtChoice] != nil else {
+                throw ControllerError.invalid("Invalid target \(tgtChoice)")
             }
-            return JevDecision(operation: operation, targetIndex: targetIndex, textValue: textValue, confidence: confidence)
+            return JevResult(
+                decision: AgentDecision(operation: opChoice, targetIndex: tgtChoice),
+                done: done, absent: absent, pickedNone: false, latencyMs: latencyMs
+            )
         }
 
-        // OpenRouter chat wrapper: {choices: [{message: {content: "..."}}]}
-        if let choices = json["choices"] as? [[String: Any]],
-           let msg = choices.first?["message"] as? [String: Any],
-           let content = msg["content"] as? String {
-            let cleaned = content
-                .replacingOccurrences(of: "```json", with: "")
-                .replacingOccurrences(of: "```", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if let d = cleaned.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-               let op = obj["operation"] as? String {
-                let target = obj["target"] as? Int
-                return JevDecision(operation: op, targetIndex: target.map(String.init), textValue: nil, confidence: 1.0)
-            }
+        if opChoice == "PRESS_RETURN" || opChoice == "PRESS_ESCAPE" {
+            return JevResult(
+                decision: AgentDecision(operation: "KEY_PRESS", key: opChoice == "PRESS_RETURN" ? "return" : "escape"),
+                done: done, absent: absent, pickedNone: false, latencyMs: latencyMs
+            )
         }
 
-        throw JevError.parseError(String(data: data, encoding: .utf8) ?? "")
+        return JevResult(
+            decision: AgentDecision(operation: opChoice),
+            done: done, absent: absent, pickedNone: false, latencyMs: latencyMs
+        )
     }
 }

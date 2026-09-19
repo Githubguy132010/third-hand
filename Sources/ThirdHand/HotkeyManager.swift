@@ -10,7 +10,10 @@ final class HotkeyManager {
         self.onTrigger = onTrigger
     }
 
+    var isRunning: Bool { eventTap != nil }
+
     func start() {
+        guard eventTap == nil else { return }
         let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
         let refcon = Unmanaged.passUnretained(self).toOpaque()
 

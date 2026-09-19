@@ -49,11 +49,10 @@ final class StatusIndicatorWindow: NSPanel {
     }
 
     func showError(_ msg: String) {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(msg, forType: .string)
-        hosting.rootView = StatusView(text: "✗ Error copied to clipboard", showSpinner: false, onCancel: {})
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+        setContentSize(NSSize(width: 420, height: 110))
+        hosting.rootView = StatusView(text: "✗ " + msg, showSpinner: false, onCancel: {})
+        orderFront(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
             self?.dismiss()
         }
     }
@@ -84,7 +83,7 @@ private struct StatusView: View {
             Text(text)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(.white.opacity(0.85))
-                .lineLimit(1)
+                .lineLimit(showSpinner ? 1 : 5)
             Spacer()
             if showSpinner {
                 Button(action: onCancel) {

@@ -9,6 +9,7 @@ struct ThirdHandApp: App {
             Button("Run on Current App (⌃Space)") {
                 appDelegate.handleHotkey()
             }
+            Button("Status & Permissions…") { appDelegate.showSetup() }
             Divider()
             Button("Set API Key…") {
                 appDelegate.promptAPIKey()

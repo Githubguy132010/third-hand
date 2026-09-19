@@ -3,3 +3,5 @@
 Third Hand.app/
 *.swp
 .swiftpm/
+
+.thirdhand-signing-identity

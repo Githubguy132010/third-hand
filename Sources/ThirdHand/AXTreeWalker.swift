@@ -1,19 +1,25 @@
 import ApplicationServices
+import Foundation
 
 enum AXTreeWalker {
-    static func walk(target: AppTarget) -> [AccessibilityElement] {
+    static func walk(target: AppTarget, timeBudget: TimeInterval = 0.8) -> [AccessibilityElement] {
         var elements: [AccessibilityElement] = []
         var nextId = 1
-        let root = target.windowElement ?? target.appElement
+        var visited = 0
+        let deadline = Date().addingTimeInterval(timeBudget)
+        AXUIElementSetMessagingTimeout(target.appElement, 0.1)
+        var focused: CFTypeRef?
+        AXUIElementCopyAttributeValue(target.appElement, kAXFocusedWindowAttribute as CFString, &focused)
+        let root = focused.map { $0 as! AXUIElement } ?? target.appElement
 
-        enumerate(root, depth: 0, maxDepth: 12, elements: &elements, nextId: &nextId, limit: 300)
+        enumerate(root, depth: 0, maxDepth: 30, elements: &elements, nextId: &nextId, visited: &visited, deadline: deadline, limit: 500)
 
         if elements.isEmpty {
             var winVal: AnyObject?
             AXUIElementCopyAttributeValue(target.appElement, kAXWindowsAttribute as CFString, &winVal)
             if let windows = winVal as? [AXUIElement] {
                 for win in windows {
-                    enumerate(win, depth: 0, maxDepth: 12, elements: &elements, nextId: &nextId, limit: 300)
+                    enumerate(win, depth: 0, maxDepth: 30, elements: &elements, nextId: &nextId, visited: &visited, deadline: deadline, limit: 500)
                 }
             }
         }
@@ -33,17 +39,33 @@ enum AXTreeWalker {
         maxDepth: Int,
         elements: inout [AccessibilityElement],
         nextId: inout Int,
+        visited: inout Int,
+        deadline: Date,
         limit: Int
     ) {
-        guard depth < maxDepth, elements.count < limit else { return }
+        guard depth < maxDepth, elements.count < limit, visited < 3000, Date() < deadline else { return }
+        visited += 1
 
-        let role = attr(element, kAXRoleAttribute) as? String ?? ""
-        let title = attr(element, kAXTitleAttribute) as? String
-        let desc = attr(element, kAXDescriptionAttribute) as? String
-        let roleDesc = attr(element, kAXRoleDescriptionAttribute) as? String
-        let value = attr(element, kAXValueAttribute) as? String
-        let enabled = (attr(element, kAXEnabledAttribute) as? Bool) ?? true
-        let label = title ?? desc ?? roleDesc
+        // Fetch metadata together instead of making a separate cross-process call per attribute.
+        let keys = [kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute,
+                    kAXRoleDescriptionAttribute, kAXValueAttribute, kAXEnabledAttribute, kAXChildrenAttribute]
+        var batch: CFArray?
+        let result = AXUIElementCopyMultipleAttributeValues(element, keys as CFArray, [], &batch)
+        let values = batch as? [AnyObject]
+        func attribute(_ key: String) -> AnyObject? {
+            if result == .success, let index = keys.firstIndex(of: key), let values, index < values.count {
+                return values[index]
+            }
+            return attr(element, key)
+        }
+        let role = attribute(kAXRoleAttribute) as? String ?? ""
+        let title = attribute(kAXTitleAttribute) as? String
+        let desc = attribute(kAXDescriptionAttribute) as? String
+        let roleDesc = attribute(kAXRoleDescriptionAttribute) as? String
+        let rawValue = attribute(kAXValueAttribute)
+        let value = (rawValue as? String) ?? (rawValue as? NSNumber)?.stringValue
+        let enabled = (attribute(kAXEnabledAttribute) as? Bool) ?? true
+        let label = [title, desc, roleDesc].compactMap { $0 }.first { !$0.isEmpty }
 
         var actionNames: CFArray?
         AXUIElementCopyActionNames(element, &actionNames)
@@ -51,9 +73,9 @@ enum AXTreeWalker {
 
         let hasAnyAction = !actions.isEmpty
         let hasLabel = (label != nil && label != "") || (value != nil && value != "")
-        let shouldSkip = skipRoles.contains(role) || role == "AXGroup"
+        let shouldSkip = skipRoles.contains(role) || (role == "AXGroup" && !hasAnyAction)
 
-        if !shouldSkip && hasLabel && (hasAnyAction || isInteractiveRole(role)) {
+        if !shouldSkip && hasLabel && (hasAnyAction || isInteractiveRole(role) || role == "AXStaticText") {
             elements.append(AccessibilityElement(
                 id: nextId,
                 role: role,
@@ -61,14 +83,15 @@ enum AXTreeWalker {
                 value: value,
                 enabled: enabled,
                 actions: actions,
-                axElement: element
+                axElement: element,
+                frame: nil
             ))
             nextId += 1
         }
 
-        guard let children = attr(element, kAXChildrenAttribute) as? [AXUIElement] else { return }
+        guard let children = attribute(kAXChildrenAttribute) as? [AXUIElement] else { return }
         for child in children {
-            enumerate(child, depth: depth + 1, maxDepth: maxDepth, elements: &elements, nextId: &nextId, limit: limit)
+            enumerate(child, depth: depth + 1, maxDepth: maxDepth, elements: &elements, nextId: &nextId, visited: &visited, deadline: deadline, limit: limit)
         }
     }
 

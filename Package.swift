@@ -8,6 +8,7 @@ let package = Package(
         .executableTarget(
             name: "ThirdHand",
             path: "Sources/ThirdHand"
-        )
+        ),
+        .testTarget(name: "ThirdHandTests", dependencies: ["ThirdHand"])
     ]
 )
