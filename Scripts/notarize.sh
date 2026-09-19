@@ -8,7 +8,7 @@ fi
 PROFILE="$1"
 bash Scripts/build.sh --install
 APP="$PWD/Third Hand.app"
-if ! codesign -dv --verbose=4 "$APP" 2>&1 | grep -q 'Authority=Developer ID Application:'; then
+if ! codesign -dv --verbose=4 "$APP" 2>&1 | grep 'Authority=Developer ID Application:' >/dev/null; then
     echo 'Notarization requires a Developer ID Application certificate. Signing identity was not changed.' >&2
     exit 1
 fi

@@ -4,7 +4,11 @@ A small macOS menu bar assistant. Focus an app, press **Control–Space**, and t
 
 Third Hand reads accessible controls, types, clicks, and checks the result. Press **Control–Space** again or click **×** to stop.
 
-## Get started
+## Download
+
+[Download the latest release](https://github.com/shhivv/third-hand/releases/latest) for Apple Silicon Macs running macOS 14 or newer. Unzip the archive, move **Third Hand.app** to Applications, and open it. Release builds are Developer ID-signed and notarized by Apple. A TypeSafe API key is required.
+
+## Build from source
 
 You’ll need **Xcode 15 or newer**, an Apple Development or Developer ID signing certificate, and a [TypeSafe API key](https://typesafe.ai).
 
