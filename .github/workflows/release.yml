@@ -69,6 +69,8 @@ jobs:
         id: inputs
         shell: bash
         env:
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           TAG_MODE: ${{ inputs.tag_mode }}
           VERSION: ${{ inputs.version }}
           EXISTING_TAG: ${{ inputs.existing_tag }}
@@ -77,6 +79,10 @@ jobs:
         run: |
           set -euo pipefail
           fail() { printf '::error::%s\n' "$1"; exit 1; }
+
+          if [[ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            fail "Releases must be dispatched from $DEFAULT_BRANCH, but this run is from '$REF'. Pick $DEFAULT_BRANCH in the branch dropdown; a new tag would otherwise point at that branch."
+          fi
 
           if [[ "$TAG_MODE" == "new" ]]; then
             [[ -n "$VERSION" ]] || fail "tag_mode=new requires 'version' (for example v0.2.0)."
@@ -243,13 +249,15 @@ jobs:
           fi
 
           VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          TEAM="$(printf '%s\n' "$DETAILS" | grep -m1 '^TeamIdentifier=' | cut -d= -f2-)"
 
           {
             printf '### Signed build\n\n'
             printf '| Field | Value |\n| --- | --- |\n'
             printf '| Version | %s |\n' "$VERSION"
             printf '| Signing authority | %s |\n' "$AUTHORITY"
-            printf '\nConfirm this authority matches the identity that signed the previous releases (see AGENTS.md).\n'
+            printf '| Team identifier | %s |\n' "$TEAM"
+            printf '\nConfirm the authority and team identifier match the identity that signed the previous releases (see AGENTS.md).\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish release
