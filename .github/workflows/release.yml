@@ -1,24 +1,9 @@
 name: Release
 
-# Manual, maintainer-triggered release pipeline.
-#
-# Builds Third Hand for Apple Silicon, signs it with a Developer ID Application
-# certificate, notarizes and staples it, then publishes the notarized archive as a
-# GitHub Release.
-#
-# Required repository secrets (Settings -> Secrets and variables -> Actions):
-#   DEVELOPER_ID_APPLICATION_P12           base64 of the Developer ID Application .p12
-#   DEVELOPER_ID_APPLICATION_P12_PASSWORD  password for that .p12
-#   KEYCHAIN_PASSWORD                      throwaway password for the temporary CI keychain
-#   NOTARY_APPLE_ID                        Apple ID used for notarization
-#   NOTARY_TEAM_ID                         Apple Developer team ID
-#   NOTARY_PASSWORD                        app-specific password for that Apple ID
-#
-# The certificate must be the same Developer ID Application identity that signed the
-# previous releases. A different identity changes the app's designated requirement,
-# which resets Accessibility and Screen Recording grants for everyone who updates.
-# Per AGENTS.md this workflow never falls back to ad-hoc signing: a missing or
-# non-Developer-ID certificate fails the run instead.
+# Manual release: builds, Developer ID-signs, notarizes and publishes.
+# Repository secrets: DEVELOPER_ID_APPLICATION_P12 (+ its _PASSWORD),
+# KEYCHAIN_PASSWORD, NOTARY_APPLE_ID, NOTARY_TEAM_ID, NOTARY_PASSWORD.
+# The signing identity must match the one used for previous releases; see AGENTS.md.
 
 on:
   workflow_dispatch:
@@ -201,8 +186,7 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
 
-          # build.sh runs `security find-identity` with no keychain argument, so the
-          # temporary keychain has to be on the user search list, not just the default.
+          # build.sh runs find-identity with no keychain arg, so add this keychain to the search list.
           existing_keychains=()
           while IFS= read -r line; do
             existing_keychains+=("${line//\"/}")
